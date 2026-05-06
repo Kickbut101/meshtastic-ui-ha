@@ -80,7 +80,26 @@ class ModuleConfigPanel extends LitElement {
       settingsStyles,
       formStyles,
       saveBarStyles,
-      css` :host { display: block; } `,
+      css`
+        :host { display: block; }
+        .info-banner {
+          background: var(--secondary-background-color);
+          border-left: 3px solid var(--info-color, #2196f3);
+          padding: 10px 12px;
+          border-radius: 4px;
+          font-size: 12px;
+          line-height: 1.5;
+          margin-bottom: 12px;
+          color: var(--primary-text-color);
+        }
+        .info-banner code {
+          background: var(--code-editor-background-color, rgba(0,0,0,0.15));
+          padding: 1px 5px;
+          border-radius: 3px;
+          font-size: 11px;
+          font-family: var(--code-font-family, monospace);
+        }
+      `,
     ];
   }
 
@@ -449,9 +468,14 @@ class MeshSettingsTelemetry extends ModuleConfigPanel {
         <div class="settings-panel-body">
           <div class="settings-section">
             ${this._sectionTitle("Device Metrics")}
+            <div class="info-banner">
+              <strong>Charts not updating?</strong> Firmware 2.7.x defaults this to <code>3600</code> (1 hour),
+              which is why battery / channel utilization / airtime graphs may look frozen.
+              For a live dashboard, set this to <code>300</code> (5 min) or <code>600</code> (10 min).
+            </div>
             <div class="form-grid">
               <mesh-number-input label="Update Interval (secs)"
-                description="How often to broadcast device metrics (0 = default)"
+                description="How often the radio broadcasts device metrics. 0 uses the firmware default (3600s on fw 2.7.x)."
                 .value=${d.device_update_interval ?? 0} .min=${0}
                 @change=${(e) => this._updateField("device_update_interval", e.detail.value)}></mesh-number-input>
             </div>
