@@ -247,6 +247,17 @@ class MeshtasticUiPanel extends LitElement {
     }
   }
 
+  _radioLabel(radio) {
+    if (!radio) return "Meshtastic Radio";
+    // Prefer the radio's user-set long name. If we have a last-4 disambiguator,
+    // append it so two radios named the same thing are still distinguishable.
+    const base = radio.name || radio.title || "Meshtastic Radio";
+    if (radio.last4) {
+      return `${base} (${radio.last4})`;
+    }
+    return base;
+  }
+
   async _switchRadio(radioId) {
     if (!radioId || radioId === this._selectedRadioId) return;
     this._selectedRadioId = radioId;
@@ -780,6 +791,7 @@ class MeshtasticUiPanel extends LitElement {
         user-select: none;
         display: flex;
         align-items: center;
+        white-space: nowrap;
       }
 
       .tab:hover {
@@ -819,6 +831,10 @@ class MeshtasticUiPanel extends LitElement {
         font-size: 13px;
         cursor: pointer;
         max-width: 180px;
+        flex-shrink: 1;
+        min-width: 0;
+        text-overflow: ellipsis;
+        overflow: hidden;
       }
       .radio-picker:focus { outline: none; border-color: var(--primary-color); }
       .bell-icon {
@@ -1015,9 +1031,24 @@ class MeshtasticUiPanel extends LitElement {
       .traceroute-error ha-icon { --mdc-icon-size: 36px; margin-bottom: 12px; opacity: 0.5; display: block; }
 
       @media (max-width: 600px) {
-        .tabs { padding: 0 4px; }
-        .tab { padding: 10px 12px; font-size: 13px; }
+        .tabs {
+          padding: 0 4px;
+          gap: 0;
+          overflow-x: auto;
+          scrollbar-width: none;
+        }
+        .tabs::-webkit-scrollbar { display: none; }
+        .tab { padding: 10px 8px; font-size: 13px; flex-shrink: 0; }
         .content { padding: 8px 8px 0; }
+        .radio-picker {
+          max-width: 100px;
+          padding: 4px 4px;
+          margin-right: 2px;
+          font-size: 11px;
+          flex-shrink: 0;
+        }
+        .bell-icon { padding: 8px; flex-shrink: 0; }
+        .menu-btn { flex-shrink: 0; }
       }
     `;
   }
@@ -1054,7 +1085,7 @@ class MeshtasticUiPanel extends LitElement {
           >
             ${this._radios.map((r) => html`
               <option value=${r.radio_id} ?selected=${r.radio_id === this._selectedRadioId}>
-                ${r.title || "Meshtastic Radio"}
+                ${this._radioLabel(r)}
               </option>
             `)}
           </select>

@@ -131,15 +131,23 @@ def _radio_id_field() -> dict:
 async def ws_radios(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """List all configured Meshtastic radios with their connection info."""
+    """List all configured Meshtastic radios with their connection info.
+
+    Picks the most user-friendly label available — preferring the radio's
+    user-set long name, then short name, falling back to the config entry
+    title or "Meshtastic Radio". Includes the last 4 hex chars of the
+    address as a disambiguator when there are multiple radios.
+    """
     entries = _get_entries(hass)
     radios: list[dict[str, Any]] = []
     for entry_id, data in entries.items():
         if entry_id == "_legacy":
-            # Test fixture using the old singleton shape.
             radios.append({
                 "radio_id": "_legacy",
                 "title": "Meshtastic Radio",
+                "name": "Meshtastic Radio",
+                "short_name": None,
+                "last4": None,
                 "connection_type": None,
                 "address": None,
                 "state": None,
@@ -147,18 +155,52 @@ async def ws_radios(
             continue
         conn = data.get("connection")
         config = data.get("config", {})
+        address = (
+            config.get("ble_address")
+            or config.get("tcp_hostname")
+            or config.get("serial_dev_path")
+        )
+
+        # Pull the radio's user-set name from the connected interface.
+        long_name = None
+        short_name = None
+        if conn is not None:
+            try:
+                user = conn.my_info.get("user", {}) if conn.my_info else {}
+                long_name = user.get("longName")
+                short_name = user.get("shortName")
+            except Exception:  # noqa: BLE001
+                pass
+
+        # last 4 hex of the address (lowercase XX:XX) — works for BLE MACs
+        # and trims hostnames where it doesn't apply.
+        last4 = _format_address_last4(address)
+
+        # Best-effort label: longName > config entry title > generic.
+        label = long_name or data.get("title") or "Meshtastic Radio"
+
         radios.append({
             "radio_id": entry_id,
-            "title": data.get("title") or "Meshtastic Radio",
+            "title": label,
+            "name": long_name,
+            "short_name": short_name,
+            "last4": last4,
             "connection_type": config.get("connection_type"),
-            "address": (
-                config.get("ble_address")
-                or config.get("tcp_hostname")
-                or config.get("serial_dev_path")
-            ),
+            "address": address,
             "state": str(conn.state) if conn is not None else None,
         })
     connection.send_result(msg["id"], {"radios": radios})
+
+
+def _format_address_last4(address: str | None) -> str | None:
+    """Return the last 4 hex chars of a MAC-like address as 'xx:xx', else None."""
+    if not address:
+        return None
+    hex_only = address.lower().replace(":", "").replace("-", "")
+    # Only return last4 if the address looks like a MAC (12 hex chars).
+    if len(hex_only) >= 12 and all(c in "0123456789abcdef" for c in hex_only[-12:]):
+        return f"{hex_only[-4:-2]}:{hex_only[-2:]}"
+    return None
 
 
 @websocket_command(
