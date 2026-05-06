@@ -247,17 +247,6 @@ class MeshtasticUiPanel extends LitElement {
     }
   }
 
-  _radioLabel(radio) {
-    if (!radio) return "Meshtastic Radio";
-    // Prefer the radio's user-set long name. If we have a last-4 disambiguator,
-    // append it so two radios named the same thing are still distinguishable.
-    const base = radio.name || radio.title || "Meshtastic Radio";
-    if (radio.last4) {
-      return `${base} (${radio.last4})`;
-    }
-    return base;
-  }
-
   async _switchRadio(radioId) {
     if (!radioId || radioId === this._selectedRadioId) return;
     this._selectedRadioId = radioId;
@@ -820,23 +809,6 @@ class MeshtasticUiPanel extends LitElement {
         line-height: 1; box-sizing: border-box;
       }
 
-      .radio-picker {
-        align-self: center;
-        padding: 4px 8px;
-        margin-right: 8px;
-        border: 1px solid var(--divider-color);
-        border-radius: 6px;
-        background: var(--card-background-color);
-        color: var(--primary-text-color);
-        font-size: 13px;
-        cursor: pointer;
-        max-width: 180px;
-        flex-shrink: 1;
-        min-width: 0;
-        text-overflow: ellipsis;
-        overflow: hidden;
-      }
-      .radio-picker:focus { outline: none; border-color: var(--primary-color); }
       .bell-icon {
         display: flex; align-items: center; padding: 12px;
         cursor: pointer; color: var(--secondary-text-color);
@@ -1040,13 +1012,6 @@ class MeshtasticUiPanel extends LitElement {
         .tabs::-webkit-scrollbar { display: none; }
         .tab { padding: 10px 8px; font-size: 13px; flex-shrink: 0; }
         .content { padding: 8px 8px 0; }
-        .radio-picker {
-          max-width: 100px;
-          padding: 4px 4px;
-          margin-right: 2px;
-          font-size: 11px;
-          flex-shrink: 0;
-        }
         .bell-icon { padding: 8px; flex-shrink: 0; }
         .menu-btn { flex-shrink: 0; }
       }
@@ -1077,19 +1042,6 @@ class MeshtasticUiPanel extends LitElement {
           `;
         })}
         <div style="flex:1;"></div>
-        ${this._radios.length > 1 ? html`
-          <select class="radio-picker"
-            .value=${this._selectedRadioId || ""}
-            @change=${(e) => this._switchRadio(e.target.value)}
-            title="Switch active radio"
-          >
-            ${this._radios.map((r) => html`
-              <option value=${r.radio_id} ?selected=${r.radio_id === this._selectedRadioId}>
-                ${this._radioLabel(r)}
-              </option>
-            `)}
-          </select>
-        ` : ""}
         <div class="tab bell-icon" @click=${() => { this._showNotificationModal = true; }}>
           <ha-icon icon="mdi:${this._notificationPrefs.enabled ? "bell" : "bell-outline"}"
             style="--mdc-icon-size: 20px;"></ha-icon>
@@ -1120,8 +1072,11 @@ class MeshtasticUiPanel extends LitElement {
           .chartWindow=${this._chartWindow}
           .bucketInterval=${this._tsBucketInterval || 10}
           .reconnecting=${this._reconnecting}
+          .radios=${this._radios}
+          .selectedRadioId=${this._selectedRadioId}
           @chart-window-change=${this._onChartWindowChange}
           @reconnect=${this._onReconnect}
+          @switch-radio=${(e) => this._switchRadio(e.detail.radio_id)}
         ></mesh-radio-tab>`;
       case "messages":
         return html`

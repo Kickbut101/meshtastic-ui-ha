@@ -164,6 +164,8 @@ export class MeshRadioTab extends LitElement {
       chartWindow: { type: Number },
       bucketInterval: { type: Number },
       reconnecting: { type: Boolean },
+      radios: { type: Array },
+      selectedRadioId: { type: String },
     };
   }
 
@@ -175,6 +177,8 @@ export class MeshRadioTab extends LitElement {
     this.chartWindow = 3600;
     this.bucketInterval = 10;
     this.reconnecting = false;
+    this.radios = [];
+    this.selectedRadioId = null;
   }
 
   static get styles() {
@@ -210,12 +214,41 @@ export class MeshRadioTab extends LitElement {
           background: #f44336;
           box-shadow: 0 0 6px rgba(244,67,54,0.4);
         }
-        .gateway-name { font-size: 16px; font-weight: 600; flex: 1; }
+        .gateway-name { font-size: 16px; font-weight: 600; flex: 0 1 auto; min-width: 0; }
+        .gateway-name-switcher {
+          appearance: none;
+          -webkit-appearance: none;
+          background: transparent;
+          border: none;
+          color: var(--primary-text-color);
+          font-size: 16px;
+          font-weight: 600;
+          font-family: inherit;
+          padding: 4px 24px 4px 0;
+          margin: 0;
+          cursor: pointer;
+          outline: none;
+          background-image: linear-gradient(45deg, transparent 50%, var(--secondary-text-color) 50%),
+                            linear-gradient(135deg, var(--secondary-text-color) 50%, transparent 50%);
+          background-position: calc(100% - 10px) center, calc(100% - 5px) center;
+          background-size: 5px 5px, 5px 5px;
+          background-repeat: no-repeat;
+          max-width: 100%;
+          text-overflow: ellipsis;
+          overflow: hidden;
+          white-space: nowrap;
+        }
+        .gateway-name-switcher:hover { color: var(--primary-color); }
+        .gateway-name-switcher:focus { outline: none; }
         .gateway-meta {
           display: flex; gap: 16px;
           font-size: 13px; color: var(--secondary-text-color);
+          margin-left: 16px;
+          flex-shrink: 1;
+          min-width: 0;
+          overflow: hidden;
         }
-        .gateway-meta span { white-space: nowrap; }
+        .gateway-meta span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .reconnect-btn {
           padding: 5px 12px;
           border: 1px solid var(--divider-color);
@@ -431,16 +464,38 @@ export class MeshRadioTab extends LitElement {
     this.dispatchEvent(new CustomEvent("reconnect", { bubbles: true, composed: true }));
   }
 
+  _onRadioSwitch(radioId) {
+    if (!radioId || radioId === this.selectedRadioId) return;
+    this.dispatchEvent(new CustomEvent("switch-radio", {
+      detail: { radio_id: radioId },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   _renderGatewayCard(gw) {
     const isConnected = gw.state?.toLowerCase() === "connected" || gw.state?.toLowerCase() === "on";
     const sensors = gw.sensors || {};
     const channels = gw.channels || [];
 
+    const multipleRadios = (this.radios || []).length > 1;
     return html`
       <div class="gateway-card">
         <div class="gateway-card-header">
           <div class="status-dot ${isConnected ? "connected" : "disconnected"}"></div>
-          <div class="gateway-name">${gw.name}</div>
+          ${multipleRadios ? html`
+            <select class="gateway-name-switcher"
+              .value=${this.selectedRadioId || ""}
+              @change=${(e) => this._onRadioSwitch(e.target.value)}
+              title="Switch active radio"
+            >
+              ${this.radios.map((r) => html`
+                <option value=${r.radio_id} ?selected=${r.radio_id === this.selectedRadioId}>
+                  ${r.name || r.title || "Meshtastic Radio"}${r.last4 ? ` (${r.last4})` : ""}
+                </option>
+              `)}
+            </select>
+          ` : html`<div class="gateway-name">${gw.name}</div>`}
           <div class="gateway-meta">
             ${gw.model ? html`<span>${gw.model}</span>` : ""}
             ${gw.firmware ? html`<span>v${gw.firmware}</span>` : ""}
