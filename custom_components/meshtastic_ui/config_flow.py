@@ -69,6 +69,21 @@ def _format_rssi(info: BluetoothServiceInfoBleak) -> str:
     return f"{prefix}, {rssi} dBm"
 
 
+def _extract_last4(address: str) -> str:
+    """Return the last 4 hex chars of a MAC, formatted xx:xx (lowercase).
+
+    Matches the Meshtastic on-screen short name format. Note that on most
+    ESP32 boards the BLE MAC is base MAC + 1, while the node ID derives
+    from the WiFi/base MAC — so the BLE last-4 may be one byte off from
+    what the radio displays. We surface that caveat in the confirm step
+    description.
+    """
+    hex_only = address.lower().replace(":", "").replace("-", "")
+    if len(hex_only) < 4:
+        return address
+    return f"{hex_only[-4:-2]}:{hex_only[-2:]}"
+
+
 class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
     """Config flow for Meshtastic UI integration."""
 
@@ -80,6 +95,7 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovered_address: str | None = None
         self._discovered_name: str | None = None
         self._discovered_rssi: str | None = None
+        self._discovered_last4: str | None = None
         self._discovered_host: str | None = None
         self._discovered_port: int | None = None
 
@@ -124,11 +140,13 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovered_address = discovery_info.address
         self._discovered_name = _resolve_ble_name(discovery_info)
         self._discovered_rssi = _format_rssi(discovery_info)
+        self._discovered_last4 = _extract_last4(discovery_info.address)
 
         self.context["title_placeholders"] = {
             "name": self._discovered_name,
             "address": self._discovered_address,
             "rssi": self._discovered_rssi or "—",
+            "last4": self._discovered_last4,
         }
 
         return await self.async_step_bluetooth_confirm()
@@ -154,6 +172,7 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
                 "name": self._discovered_name,
                 "address": self._discovered_address,
                 "rssi": self._discovered_rssi or "unknown",
+                "last4": self._discovered_last4 or "unknown",
             },
         )
 

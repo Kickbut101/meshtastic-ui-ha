@@ -1,6 +1,6 @@
 {
   "config": {
-    "flow_title": "{name} — {address} ({rssi})",
+    "flow_title": "{name} {last4} — {address} ({rssi})",
     "step": {
       "user": {
         "title": "Meshtastic UI",
@@ -40,7 +40,7 @@
       },
       "bluetooth_confirm": {
         "title": "Set up Meshtastic radio",
-        "description": "A Meshtastic radio was discovered via Bluetooth:\n\n**{name}**\n`{address}`\n\nSignal: {rssi}\n\nThe model and device name aren't visible until after pairing — use the signal strength to identify which physical radio this is (move closer to one, then refresh the Discovered card; the closer device will show stronger signal).\n\nDo you want to set it up?"
+        "description": "A Meshtastic radio was discovered via Bluetooth:\n\n**{name}**\n`{address}`\n\nSignal: {rssi}\n\nBLE MAC ends in **{last4}** — this is usually one byte off from the short name shown on the radio's screen because ESP32 chips use a different MAC for BLE than for the node ID (BLE = WiFi MAC + 1). Use signal strength to confirm which physical radio this is: move closer to one and refresh the Discovered card; the closer device will show stronger signal.\n\nDo you want to set it up?"
       },
       "zeroconf_confirm": {
         "title": "Set up Meshtastic radio",
