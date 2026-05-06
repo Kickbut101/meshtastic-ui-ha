@@ -306,3 +306,103 @@ class TestSerialization:
         assert "10" in data["waypoints"]
         assert "!dd" in data["traceroutes"]
         assert data["notification_prefs"]["enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Storage clearing (#37)
+# ---------------------------------------------------------------------------
+
+class TestStorageClearing:
+    """Tests for the bulk-clear methods used by Settings -> Storage."""
+
+    def test_clear_messages_specific_conversation(self, store: MeshtasticUiStore):
+        store.add_channel_message("0", {"text": "a"})
+        store.add_channel_message("0", {"text": "b"})
+        store.add_dm_message("!aa", {"text": "x"})
+
+        removed = store.clear_messages("0")
+        assert removed == 2
+        assert store.get_channel_messages("0") == []
+        # DM untouched.
+        assert len(store.get_dm_messages("!aa")) == 1
+
+    def test_clear_messages_specific_dm(self, store: MeshtasticUiStore):
+        store.add_dm_message("!aa", {"text": "x"})
+        store.add_channel_message("0", {"text": "y"})
+
+        removed = store.clear_messages("!aa")
+        assert removed == 1
+        assert store.get_dm_messages("!aa") == []
+        assert len(store.get_channel_messages("0")) == 1
+
+    def test_clear_messages_all(self, store: MeshtasticUiStore):
+        store.add_channel_message("0", {"text": "a"})
+        store.add_channel_message("1", {"text": "b"})
+        store.add_dm_message("!aa", {"text": "x"})
+
+        removed = store.clear_messages(None)
+        assert removed == 3
+        assert store.get_all_channel_ids() == []
+        assert store.get_all_dm_ids() == []
+
+    def test_clear_messages_unknown_conversation(self, store: MeshtasticUiStore):
+        assert store.clear_messages("does-not-exist") == 0
+
+    def test_clear_nodes_clears_traceroutes_too(self, store: MeshtasticUiStore):
+        store.update_node("!aa", {"name": "A"})
+        store.update_node("!bb", {"name": "B"})
+        store.set_traceroute("!aa", {"route": []})
+
+        removed = store.clear_nodes()
+        assert removed == 3  # 2 nodes + 1 traceroute
+        assert store.get_nodes() == {}
+        assert store.get_all_traceroutes() == {}
+
+    def test_clear_all_wipes_everything_except_prefs(self, store: MeshtasticUiStore):
+        store.add_channel_message("0", {"text": "a"})
+        store.add_dm_message("!aa", {"text": "b"})
+        store.update_node("!bb", {"name": "B"})
+        store.set_favorite("!bb", True)
+        store.set_ignored("!cc", True)
+        store.add_waypoint(10, {"name": "WP"})
+        store.set_traceroute("!dd", {"route": []})
+        store.set_notification_prefs({"enabled": True})
+
+        counts = store.clear_all()
+
+        assert counts["messages"] == 2
+        assert counts["nodes"] == 1
+        assert counts["traceroutes"] == 1
+        assert counts["waypoints"] == 1
+        assert counts["favorites"] == 1
+        assert counts["ignored"] == 1
+
+        assert store.get_all_channel_ids() == []
+        assert store.get_all_dm_ids() == []
+        assert store.get_nodes() == {}
+        assert store.favorite_nodes == set()
+        assert store.ignored_nodes == set()
+        assert store.get_waypoints() == {}
+        assert store.get_all_traceroutes() == {}
+        assert store.messages_today == 0
+        # Notification prefs preserved.
+        assert store.get_notification_prefs()["enabled"] is True
+
+    def test_stats_returns_current_counts(self, store: MeshtasticUiStore):
+        store.add_channel_message("0", {"text": "a"})
+        store.add_channel_message("0", {"text": "b"})
+        store.add_dm_message("!aa", {"text": "c"})
+        store.update_node("!bb", {"name": "B"})
+        store.set_traceroute("!bb", {"route": []})
+        store.add_waypoint(1, {"name": "WP"})
+        store.set_favorite("!bb", True)
+        store.set_ignored("!cc", True)
+
+        s = store.stats()
+        assert s["messages"] == 3
+        assert s["conversations"] == 2
+        assert s["nodes"] == 1
+        assert s["traceroutes"] == 1
+        assert s["waypoints"] == 1
+        assert s["favorites"] == 1
+        assert s["ignored"] == 1

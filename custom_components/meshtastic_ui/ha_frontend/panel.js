@@ -493,6 +493,53 @@ class MeshtasticUiPanel extends LitElement {
   async _onReconnect() {
     await this._handleReconnectClick();
   }
+
+  async _onClearConversation(e) {
+    const conv = e.detail?.conversation;
+    if (!conv) return;
+    const result = await this._wsCommand("meshtastic_ui/clear_messages", { conversation: conv });
+    if (result == null) return;
+
+    // Drop messages locally and refresh the conversation list.
+    const { [conv]: _dropped, ...rest } = this._messages;
+    this._messages = rest;
+    this._channels = this._channels.filter((c) => c !== conv);
+    this._dms = this._dms.filter((d) => d !== conv);
+    if (this._unreadCounts[conv]) {
+      const { [conv]: _u, ...restUnread } = this._unreadCounts;
+      this._unreadCounts = restUnread;
+      localStorage.setItem("meshtastic_unread", JSON.stringify(this._unreadCounts));
+    }
+    if (this._selectedConversation === conv) {
+      this._selectedConversation = "";
+    }
+    this.requestUpdate();
+  }
+
+  async _onStorageCleared(e) {
+    const kind = e.detail?.kind;
+    if (kind === "clear_messages" || kind === "clear_all") {
+      this._messages = {};
+      this._channels = [];
+      this._dms = [];
+      this._unreadCounts = {};
+      localStorage.setItem("meshtastic_unread", "{}");
+      await this._loadMessages();
+    }
+    if (kind === "clear_nodes" || kind === "clear_all") {
+      this._nodes = {};
+      this._traceroutes = {};
+      this._favoriteNodes = [];
+      this._ignoredNodes = [];
+      await this._loadNodes();
+      await this._loadTraceroutes();
+    }
+    if (kind === "clear_all") {
+      this._waypoints = {};
+      await this._loadWaypoints();
+    }
+    this.requestUpdate();
+  }
     
   _onSelectConversation(e) {
     const conv = e.detail.conversation;
@@ -979,6 +1026,7 @@ class MeshtasticUiPanel extends LitElement {
             .unreadCounts=${this._unreadCounts}
             @select-conversation=${this._onSelectConversation}
             @send-message=${this._onSendMessage}
+            @clear-conversation=${this._onClearConversation}
           ></mesh-messages-tab>
         `;
       case "nodes":
@@ -1000,6 +1048,7 @@ class MeshtasticUiPanel extends LitElement {
           <mesh-settings-tab
             .hass=${this.hass}
             .wsCommand=${(type, data) => this._wsCommand(type, data)}
+            @storage-cleared=${this._onStorageCleared}
           ></mesh-settings-tab>
         `;
       default:

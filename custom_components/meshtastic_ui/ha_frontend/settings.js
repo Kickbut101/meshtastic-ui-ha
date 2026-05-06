@@ -159,6 +159,12 @@ const NAV_ITEMS = [
       { id: "actions", label: "Device Actions", icon: "mdi:cog" },
     ],
   },
+  {
+    group: "Local Data",
+    items: [
+      { id: "storage", label: "Storage", icon: "mdi:database" },
+    ],
+  },
 ];
 
 /* ══════════════════════════════════════════════════════════
@@ -357,6 +363,10 @@ export class MeshSettingsTab extends LitElement {
         return html`<mesh-settings-actions
           .wsCommand=${(type, data) => this._ws(type, data)}
         ></mesh-settings-actions>`;
+      case "storage":
+        return html`<mesh-settings-storage
+          .wsCommand=${(type, data) => this._ws(type, data)}
+        ></mesh-settings-storage>`;
       default:
         return html`<div class="empty-state">Select a settings panel</div>`;
     }
@@ -1046,6 +1056,209 @@ class MeshSettingsActions extends LitElement {
   }
 }
 customElements.define("mesh-settings-actions", MeshSettingsActions);
+
+/* ══════════════════════════════════════════════════════════
+   <mesh-settings-storage> — Local data management (#37)
+   ══════════════════════════════════════════════════════════ */
+
+class MeshSettingsStorage extends LitElement {
+  static get properties() {
+    return {
+      wsCommand: { type: Object },
+      _stats: { type: Object, state: true },
+      _confirmAction: { type: Object, state: true },
+      _feedback: { type: String, state: true },
+    };
+  }
+
+  constructor() {
+    super();
+    this._stats = null;
+    this._confirmAction = null;
+    this._feedback = "";
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this._loadStats();
+  }
+
+  static get styles() {
+    return [
+      settingsStyles,
+      deviceActionStyles,
+      dialogStyles,
+      css`
+        :host { display: block; }
+        .stats-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+          gap: 8px;
+          margin-bottom: 16px;
+        }
+        .stat-card {
+          background: var(--secondary-background-color);
+          border-radius: 8px;
+          padding: 10px 12px;
+        }
+        .stat-num {
+          font-size: 22px;
+          font-weight: 600;
+          color: var(--primary-text-color);
+          font-variant-numeric: tabular-nums;
+        }
+        .stat-label {
+          font-size: 11px;
+          color: var(--secondary-text-color);
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          margin-top: 2px;
+        }
+        .feedback {
+          margin-top: 16px;
+          padding: 10px 16px;
+          border-radius: 8px;
+          font-size: 14px;
+          font-weight: 500;
+        }
+        .feedback.success {
+          background: rgba(76,175,80,0.1);
+          color: #4caf50;
+          border: 1px solid rgba(76,175,80,0.3);
+        }
+        .feedback.error {
+          background: rgba(244,67,54,0.1);
+          color: #f44336;
+          border: 1px solid rgba(244,67,54,0.3);
+        }
+      `,
+    ];
+  }
+
+  async _loadStats() {
+    const res = await this.wsCommand("meshtastic_ui/storage_stats");
+    if (res) {
+      this._stats = res;
+      this.requestUpdate();
+    }
+  }
+
+  render() {
+    const s = this._stats || {};
+    const actions = [
+      {
+        id: "clear_messages",
+        name: "Clear Message History",
+        desc: "Delete all stored chat history (channels and DMs)",
+        icon: "mdi:message-off",
+        danger: true,
+        wsType: "meshtastic_ui/clear_messages",
+      },
+      {
+        id: "clear_nodes",
+        name: "Clear Node History",
+        desc: "Delete all tracked nodes and traceroute results",
+        icon: "mdi:database-remove",
+        danger: true,
+        wsType: "meshtastic_ui/clear_nodes",
+      },
+      {
+        id: "clear_all",
+        name: "Clear All Stored Data",
+        desc: "Wipe messages, nodes, traceroutes, waypoints, favorites, and ignored",
+        icon: "mdi:delete-sweep",
+        danger: true,
+        wsType: "meshtastic_ui/clear_all",
+      },
+    ];
+
+    return html`
+      <div class="settings-panel">
+        <div class="settings-panel-header">
+          <h3>Storage</h3>
+          <p>Manage data this integration has stored locally in Home Assistant. Useful when switching to a new radio or starting fresh.</p>
+        </div>
+        <div class="settings-panel-body">
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-num">${s.messages ?? "—"}</div>
+              <div class="stat-label">Messages</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-num">${s.conversations ?? "—"}</div>
+              <div class="stat-label">Conversations</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-num">${s.nodes ?? "—"}</div>
+              <div class="stat-label">Nodes</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-num">${s.traceroutes ?? "—"}</div>
+              <div class="stat-label">Traceroutes</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-num">${s.waypoints ?? "—"}</div>
+              <div class="stat-label">Waypoints</div>
+            </div>
+          </div>
+
+          <div class="device-actions-grid">
+            ${actions.map((a) => html`
+              <div
+                class="device-action-card ${a.danger ? "danger" : ""}"
+                @click=${() => this._requestAction(a)}
+              >
+                <ha-icon icon="${a.icon}"></ha-icon>
+                <span class="action-name">${a.name}</span>
+                <span class="action-desc">${a.desc}</span>
+              </div>
+            `)}
+          </div>
+          ${this._feedback ? html`
+            <div class="feedback ${this._feedback.startsWith("Error") ? "error" : "success"}">
+              ${this._feedback}
+            </div>
+          ` : ""}
+        </div>
+      </div>
+
+      <mesh-confirm-dialog
+        .open=${this._confirmAction != null}
+        .title=${this._confirmAction?.name || ""}
+        .message=${`Are you sure you want to ${(this._confirmAction?.name || "").toLowerCase()}? This action cannot be undone.`}
+        .confirmLabel=${this._confirmAction?.name || "Confirm"}
+        .danger=${true}
+        @confirm=${this._executeAction}
+        @cancel=${() => { this._confirmAction = null; }}
+      ></mesh-confirm-dialog>
+    `;
+  }
+
+  _requestAction(action) {
+    this._confirmAction = action;
+  }
+
+  async _executeAction() {
+    const action = this._confirmAction;
+    if (!action) return;
+    this._confirmAction = null;
+    this._feedback = "";
+
+    const result = await this.wsCommand(action.wsType);
+    if (result != null) {
+      this._feedback = `${action.name} done`;
+      await this._loadStats();
+      // Tell the panel to refresh its in-memory caches.
+      this.dispatchEvent(new CustomEvent("storage-cleared", {
+        detail: { kind: action.id }, bubbles: true, composed: true,
+      }));
+    } else {
+      this._feedback = `Error: ${action.name} failed`;
+    }
+    setTimeout(() => { this._feedback = ""; }, 5000);
+  }
+}
+customElements.define("mesh-settings-storage", MeshSettingsStorage);
 
 /* ══════════════════════════════════════════════════════════
    Reusable base class for simple config-section panels

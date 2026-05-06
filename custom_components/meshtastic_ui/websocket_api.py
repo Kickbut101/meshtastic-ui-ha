@@ -66,6 +66,10 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
     async_register_command(hass, ws_get_notification_prefs)
     async_register_command(hass, ws_set_notification_prefs)
     async_register_command(hass, ws_get_timeseries)
+    async_register_command(hass, ws_storage_stats)
+    async_register_command(hass, ws_clear_messages)
+    async_register_command(hass, ws_clear_nodes)
+    async_register_command(hass, ws_clear_all)
 
 
 def _get_store(hass: HomeAssistant) -> MeshtasticUiStore:
@@ -993,3 +997,63 @@ def ws_get_timeseries(
             "bucketInterval": bucket_interval,
         },
     )
+
+
+# ── Storage management (#37) ────────────────────────────────────────────
+
+
+@websocket_command({vol.Required("type"): f"{WS_PREFIX}/storage_stats"})
+@async_response
+async def ws_storage_stats(
+    hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return counts for the Storage settings panel."""
+    store = _get_store(hass)
+    connection.send_result(msg["id"], store.stats())
+
+
+@websocket_command(
+    {
+        vol.Required("type"): f"{WS_PREFIX}/clear_messages",
+        vol.Optional("conversation"): vol.Any(str, None),
+    }
+)
+@async_response
+async def ws_clear_messages(
+    hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Clear stored chat history (per-conversation or all)."""
+    if not connection.user.is_admin:
+        connection.send_error(msg["id"], "unauthorized", "Admin access required")
+        return
+    store = _get_store(hass)
+    removed = store.clear_messages(msg.get("conversation"))
+    connection.send_result(msg["id"], {"removed": removed})
+
+
+@websocket_command({vol.Required("type"): f"{WS_PREFIX}/clear_nodes"})
+@async_response
+async def ws_clear_nodes(
+    hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Clear all node history (nodes + traceroutes)."""
+    if not connection.user.is_admin:
+        connection.send_error(msg["id"], "unauthorized", "Admin access required")
+        return
+    store = _get_store(hass)
+    removed = store.clear_nodes()
+    connection.send_result(msg["id"], {"removed": removed})
+
+
+@websocket_command({vol.Required("type"): f"{WS_PREFIX}/clear_all"})
+@async_response
+async def ws_clear_all(
+    hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Wipe all stored data except notification preferences."""
+    if not connection.user.is_admin:
+        connection.send_error(msg["id"], "unauthorized", "Admin access required")
+        return
+    store = _get_store(hass)
+    counts = store.clear_all()
+    connection.send_result(msg["id"], counts)

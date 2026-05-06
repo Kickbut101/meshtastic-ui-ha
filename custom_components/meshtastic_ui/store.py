@@ -196,6 +196,80 @@ class MeshtasticUiStore:
             del self._nodes[node_id]
             self._schedule_save()
 
+    def clear_messages(self, conversation_id: str | None = None) -> int:
+        """Clear stored messages.
+
+        If conversation_id is None, all channel and DM history is wiped.
+        Returns the number of messages removed.
+        """
+        removed = 0
+        if conversation_id is None:
+            for msgs in self._channel_messages.values():
+                removed += len(msgs)
+            for msgs in self._dm_messages.values():
+                removed += len(msgs)
+            self._channel_messages.clear()
+            self._dm_messages.clear()
+        else:
+            if conversation_id in self._channel_messages:
+                removed = len(self._channel_messages[conversation_id])
+                del self._channel_messages[conversation_id]
+            elif conversation_id in self._dm_messages:
+                removed = len(self._dm_messages[conversation_id])
+                del self._dm_messages[conversation_id]
+        if removed:
+            self._schedule_save()
+        return removed
+
+    def clear_nodes(self) -> int:
+        """Clear all node history (nodes + traceroutes). Returns count removed."""
+        removed = len(self._nodes) + len(self._traceroutes)
+        self._nodes.clear()
+        self._traceroutes.clear()
+        if removed:
+            self._schedule_save()
+        return removed
+
+    def clear_all(self) -> dict[str, int]:
+        """Wipe everything except notification prefs. Returns counts removed."""
+        counts = {
+            "messages": sum(len(m) for m in self._channel_messages.values())
+            + sum(len(m) for m in self._dm_messages.values()),
+            "nodes": len(self._nodes),
+            "traceroutes": len(self._traceroutes),
+            "waypoints": len(self._waypoints),
+            "favorites": len(self._favorite_nodes),
+            "ignored": len(self._ignored_nodes),
+        }
+        self._channel_messages.clear()
+        self._dm_messages.clear()
+        self._nodes.clear()
+        self._traceroutes.clear()
+        self._waypoints.clear()
+        self._favorite_nodes.clear()
+        self._ignored_nodes.clear()
+        self._messages_today = 0
+        self._schedule_save()
+        return counts
+
+    def stats(self) -> dict[str, Any]:
+        """Return counts for the Storage settings panel."""
+        message_count = (
+            sum(len(m) for m in self._channel_messages.values())
+            + sum(len(m) for m in self._dm_messages.values())
+        )
+        return {
+            "messages": message_count,
+            "conversations": (
+                len(self._channel_messages) + len(self._dm_messages)
+            ),
+            "nodes": len(self._nodes),
+            "traceroutes": len(self._traceroutes),
+            "waypoints": len(self._waypoints),
+            "favorites": len(self._favorite_nodes),
+            "ignored": len(self._ignored_nodes),
+        }
+
     def get_channel_messages(self, entity_id: str) -> list[dict[str, Any]]:
         """Get messages for a channel."""
         return list(self._channel_messages.get(entity_id, []))

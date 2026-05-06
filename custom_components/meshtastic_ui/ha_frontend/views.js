@@ -521,6 +521,7 @@ export class MeshMessagesTab extends LitElement {
       nodes: { type: Object },
       unreadCounts: { type: Object },
       _replyTo: { type: Object },
+      _pendingClear: { type: Object, state: true },
     };
   }
 
@@ -538,6 +539,7 @@ export class MeshMessagesTab extends LitElement {
     this._replyTo = null;
     this._longPressTimer = null;
     this._longPressTarget = null;
+    this._pendingClear = null;
   }
 
   static get styles() {
@@ -660,7 +662,27 @@ export class MeshMessagesTab extends LitElement {
           line-height: 1;
         }
         .conversation-item.active .conv-badge { background: rgba(255,255,255,0.3); }
-        .conversation-item { display: flex; align-items: center; }
+        .conversation-item { display: flex; align-items: center; gap: 6px; }
+        .conv-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .conv-clear {
+          flex-shrink: 0;
+          opacity: 0;
+          background: transparent;
+          border: none;
+          padding: 2px;
+          color: inherit;
+          cursor: pointer;
+          border-radius: 4px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .conv-clear ha-icon { --mdc-icon-size: 16px; }
+        .conversation-item:hover .conv-clear { opacity: 0.6; }
+        .conv-clear:hover { opacity: 1 !important; background: rgba(244,67,54,0.15); color: #f44336; }
+        @media (hover: none) {
+          .conv-clear { opacity: 0.5; }
+        }
 
         /* Reply UI */
         .chat-bubble-wrapper {
@@ -760,6 +782,19 @@ export class MeshMessagesTab extends LitElement {
         .chat-bubble-wrapper.unread .chat-bubble.incoming {
           border-left: 3px solid var(--primary-color);
         }
+        .unread-divider {
+          display: flex; align-items: center; gap: 10px;
+          margin: 12px 0 8px; align-self: stretch;
+        }
+        .unread-divider::before, .unread-divider::after {
+          content: ""; flex: 1;
+          border-top: 1px solid var(--primary-color);
+          opacity: 0.5;
+        }
+        .unread-divider span {
+          font-size: 11px; font-weight: 600; text-transform: uppercase;
+          letter-spacing: 0.5px; color: var(--primary-color);
+        }
 
         @media (hover: none) {
           .bubble-actions { display: none !important; }
@@ -791,7 +826,18 @@ export class MeshMessagesTab extends LitElement {
     if (changedProps.has("messages") || changedProps.has("selectedConversation")) {
       this.updateComplete.then(() => {
         const el = this.shadowRoot?.querySelector(".chat-messages");
-        if (el) el.scrollTop = el.scrollHeight;
+        if (!el) return;
+        // When switching conversations, jump to the first unread bubble so
+        // users land on the boundary between read and unread, not at the
+        // bottom (#28). Falls back to bottom if there's nothing unread.
+        if (changedProps.has("selectedConversation")) {
+          const firstUnread = el.querySelector(".chat-bubble-wrapper.unread");
+          if (firstUnread) {
+            firstUnread.scrollIntoView({ block: "start" });
+            return;
+          }
+        }
+        el.scrollTop = el.scrollHeight;
       });
     }
   }
@@ -811,11 +857,22 @@ export class MeshMessagesTab extends LitElement {
           <div class="conversation-header">Channels</div>
           ${defaultChannels.map((ch) => {
             const badge = this.unreadCounts?.[ch] || 0;
+            const label = this.channelNames?.[ch] || (ch === "0" ? "Primary" : `Channel ${ch}`);
+            const hasMessages = (this.messages[ch]?.length || 0) > 0;
             return html`
               <div
                 class="conversation-item ${selected === ch ? "active" : ""}"
                 @click=${() => this._selectConversation(ch)}
-              >${this.channelNames?.[ch] || (ch === "0" ? "Primary" : `Channel ${ch}`)}${badge > 0 ? html`<span class="conv-badge">${badge}</span>` : ""}</div>
+              >
+                <span class="conv-name">${label}</span>
+                ${badge > 0 ? html`<span class="conv-badge">${badge}</span>` : ""}
+                ${hasMessages ? html`
+                  <button class="conv-clear" title="Clear messages in this channel"
+                    @click=${(e) => this._requestClear(e, ch, label)}>
+                    <ha-icon icon="mdi:trash-can-outline"></ha-icon>
+                  </button>
+                ` : ""}
+              </div>
             `;
           })}
           ${this.dms.length ? html`
@@ -827,7 +884,14 @@ export class MeshMessagesTab extends LitElement {
                 <div
                   class="conversation-item ${selected === dm ? "active" : ""}"
                   @click=${() => this._selectConversation(dm)}
-                >${name}${badge > 0 ? html`<span class="conv-badge">${badge}</span>` : ""}</div>
+                >
+                  <span class="conv-name">${name}</span>
+                  ${badge > 0 ? html`<span class="conv-badge">${badge}</span>` : ""}
+                  <button class="conv-clear" title="Delete this conversation"
+                    @click=${(e) => this._requestClear(e, dm, name)}>
+                    <ha-icon icon="mdi:trash-can-outline"></ha-icon>
+                  </button>
+                </div>
               `;
             })}
           ` : ""}
@@ -842,6 +906,7 @@ export class MeshMessagesTab extends LitElement {
               const msgId = msg.message_id;
               const hasActions = msgId != null;
               const isUnread = !isOutgoing && unreadStartIdx >= 0 && i >= unreadStartIdx;
+              const showUnreadDivider = unreadStartIdx >= 0 && i === unreadStartIdx;
               const showDateSep = i === 0 || !isSameDay(currentMessages[i - 1].timestamp, msg.timestamp);
               // Look up quoted reply
               let quotedMsg = null;
@@ -850,6 +915,9 @@ export class MeshMessagesTab extends LitElement {
               }
               return html`
                 ${showDateSep ? html`<div class="date-separator">${formatDateLabel(msg.timestamp)}</div>` : ""}
+                ${showUnreadDivider ? html`
+                  <div class="unread-divider"><span>${unreadCount} new message${unreadCount !== 1 ? "s" : ""}</span></div>
+                ` : ""}
                 <div class="chat-bubble-wrapper ${isOutgoing ? "outgoing" : "incoming"} ${isUnread ? "unread" : ""}"
                   @touchstart=${hasActions ? (e) => this._onTouchStart(e, msgId) : null}
                   @touchend=${hasActions ? () => this._onTouchEnd() : null}
@@ -914,6 +982,16 @@ export class MeshMessagesTab extends LitElement {
           </div>
         </div>
       </div>
+
+      <mesh-confirm-dialog
+        .open=${this._pendingClear != null}
+        title="Clear conversation"
+        .message=${this._pendingClear ? `Delete all messages in "${this._pendingClear.label}"? This action cannot be undone.` : ""}
+        confirmLabel="Clear"
+        .danger=${true}
+        @confirm=${this._confirmClear}
+        @cancel=${() => { this._pendingClear = null; }}
+      ></mesh-confirm-dialog>
     `;
   }
 
@@ -921,6 +999,22 @@ export class MeshMessagesTab extends LitElement {
     this.dispatchEvent(
       new CustomEvent("select-conversation", { detail: { conversation: conv }, bubbles: true, composed: true })
     );
+  }
+
+  _requestClear(e, conv, label) {
+    e.stopPropagation();  // don't also select the conversation
+    this._pendingClear = { conv, label };
+  }
+
+  _confirmClear() {
+    const pending = this._pendingClear;
+    this._pendingClear = null;
+    if (!pending) return;
+    this.dispatchEvent(new CustomEvent("clear-conversation", {
+      detail: { conversation: pending.conv },
+      bubbles: true,
+      composed: true,
+    }));
   }
 
   _onKeydown(e) {
