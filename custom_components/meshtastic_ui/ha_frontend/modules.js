@@ -99,6 +99,27 @@ class ModuleConfigPanel extends LitElement {
           font-size: 11px;
           font-family: var(--code-font-family, monospace);
         }
+        .quick-presets {
+          margin-top: 8px;
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+        }
+        .quick-preset {
+          padding: 3px 10px;
+          border-radius: 12px;
+          border: 1px solid var(--divider-color);
+          background: var(--card-background-color);
+          color: var(--primary-text-color);
+          font-size: 11px;
+          font-weight: 600;
+          cursor: pointer;
+        }
+        .quick-preset:hover {
+          background: var(--primary-color);
+          color: var(--text-primary-color);
+          border-color: var(--primary-color);
+        }
       `,
     ];
   }
@@ -472,6 +493,14 @@ class MeshSettingsTelemetry extends ModuleConfigPanel {
               <strong>Charts not updating?</strong> Firmware 2.7.x defaults this to <code>3600</code> (1 hour),
               which is why battery / channel utilization / airtime graphs may look frozen.
               For a live dashboard, set this to <code>300</code> (5 min) or <code>600</code> (10 min).
+              <div class="quick-presets">
+                <button class="quick-preset" type="button"
+                  @click=${() => this._updateField("device_update_interval", 300)}>5 min</button>
+                <button class="quick-preset" type="button"
+                  @click=${() => this._updateField("device_update_interval", 600)}>10 min</button>
+                <button class="quick-preset" type="button"
+                  @click=${() => this._updateField("device_update_interval", 1800)}>30 min</button>
+              </div>
             </div>
             <div class="form-grid">
               <mesh-number-input label="Update Interval (secs)"
