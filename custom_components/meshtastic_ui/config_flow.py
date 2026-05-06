@@ -35,16 +35,38 @@ def _resolve_ble_name(info: BluetoothServiceInfoBleak) -> str:
 
     bleak reports the address as `name` when no local_name is advertised — fall
     back through the advertisement data before giving up on a generic label.
+    Compares without separators so "C6-37-81-8B-C0-CA" still gets recognized
+    as the same value as "C6:37:81:8B:C0:CA".
     """
     candidates = [
         info.name,
         getattr(info, "advertisement", None) and info.advertisement.local_name,
     ]
-    address_upper = info.address.upper()
+    address_normalized = info.address.upper().replace(":", "").replace("-", "")
     for candidate in candidates:
-        if candidate and candidate.upper() != address_upper:
-            return candidate
+        if candidate:
+            normalized = candidate.upper().replace(":", "").replace("-", "")
+            if normalized != address_normalized:
+                return candidate
     return "Meshtastic Radio"
+
+
+def _format_rssi(info: BluetoothServiceInfoBleak) -> str:
+    """Format RSSI as a short proximity hint for discovery card titles."""
+    rssi = getattr(info, "rssi", None)
+    if rssi is None:
+        return ""
+    # Rough proximity buckets — actual range depends on radio + obstacles, but
+    # this gives users enough cue to tell which device is closest to them.
+    if rssi >= -55:
+        prefix = "very close"
+    elif rssi >= -70:
+        prefix = "near"
+    elif rssi >= -85:
+        prefix = "far"
+    else:
+        prefix = "very far"
+    return f"{prefix}, {rssi} dBm"
 
 
 class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -57,6 +79,7 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
         self._connection_type: str | None = None
         self._discovered_address: str | None = None
         self._discovered_name: str | None = None
+        self._discovered_rssi: str | None = None
         self._discovered_host: str | None = None
         self._discovered_port: int | None = None
 
@@ -100,10 +123,12 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
 
         self._discovered_address = discovery_info.address
         self._discovered_name = _resolve_ble_name(discovery_info)
+        self._discovered_rssi = _format_rssi(discovery_info)
 
         self.context["title_placeholders"] = {
             "name": self._discovered_name,
             "address": self._discovered_address,
+            "rssi": self._discovered_rssi or "—",
         }
 
         return await self.async_step_bluetooth_confirm()
@@ -128,6 +153,7 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "name": self._discovered_name,
                 "address": self._discovered_address,
+                "rssi": self._discovered_rssi or "unknown",
             },
         )
 
