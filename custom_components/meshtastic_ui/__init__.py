@@ -57,27 +57,70 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the Meshtastic UI component."""
-    hass.data.setdefault(DOMAIN, {})
+    hass.data.setdefault(DOMAIN, {"entries": {}})
+    # Backwards-compat: older code paths read hass.data[DOMAIN]["entries"].
+    if "entries" not in hass.data[DOMAIN]:
+        hass.data[DOMAIN]["entries"] = {}
     return True
+
+
+def _get_entry_data(
+    hass: HomeAssistant, entry_id: str | None = None
+) -> dict[str, Any] | None:
+    """Return the per-entry data dict, defaulting to the first entry if entry_id is None."""
+    domain_data = hass.data.get(DOMAIN, {})
+    entries = domain_data.get("entries")
+    # Backwards-compat for tests that still build the old singleton dict
+    # (no "entries" key, just store/connection/ts at the top level).
+    if entries is None and ("store" in domain_data or "connection" in domain_data):
+        return domain_data
+    entries = entries or {}
+    if entry_id is not None:
+        # Treat "_legacy" as a synonym for the old singleton shape.
+        if entry_id == "_legacy" and (
+            "store" in domain_data or "connection" in domain_data
+        ):
+            return domain_data
+        return entries.get(entry_id)
+    if not entries:
+        return None
+    # Default to first entry — preserves single-radio behavior when callers
+    # don't specify which one.
+    return next(iter(entries.values()))
+
+
+def _all_entry_data(hass: HomeAssistant) -> dict[str, dict[str, Any]]:
+    """Return all per-entry data dicts keyed by entry_id."""
+    return hass.data.get(DOMAIN, {}).get("entries", {})
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Meshtastic UI from a config entry."""
-    store = MeshtasticUiStore(hass)
+    hass.data.setdefault(DOMAIN, {"entries": {}})
+    if "entries" not in hass.data[DOMAIN]:
+        hass.data[DOMAIN]["entries"] = {}
+
+    is_first_entry = not hass.data[DOMAIN]["entries"]
+
+    store = MeshtasticUiStore(hass, entry.entry_id, migrate_legacy=is_first_entry)
     await store.async_load()
 
-    ts_store = TimeSeriesStore(hass)
+    ts_store = TimeSeriesStore(hass, entry.entry_id, migrate_legacy=is_first_entry)
 
     # Create the radio connection.
     connection = _create_connection(hass, entry.data)
 
-    hass.data[DOMAIN] = {
+    entry_data: dict[str, Any] = {
+        "entry_id": entry.entry_id,
+        "title": entry.title,
+        "config": dict(entry.data),
         "store": store,
         "ts_store": ts_store,
         "connection": connection,
         "unsub_callbacks": [],
         "pending_acks": {},  # packet_id -> message info for delivery tracking.
         "nodeinfo_cooldowns": {},  # node_id -> last request timestamp
+        "local_stats": {},
         "ts": {
             "data": {k: deque(maxlen=TS_MAX_POINTS) for k in _TS_SERIES_KEYS},
             "packetTypes": {k: deque(maxlen=TS_MAX_POINTS) for k in _PACKET_TYPE_KEYS},
@@ -87,11 +130,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "local_node_num": None,
         },
     }
+    hass.data[DOMAIN]["entries"][entry.entry_id] = entry_data
 
     # Restore persisted time-series data.
     saved_ts = await ts_store.async_load()
     if saved_ts:
-        ts = hass.data[DOMAIN]["ts"]
+        ts = entry_data["ts"]
         for key in _TS_SERIES_KEYS:
             if key in saved_ts.get("data", {}):
                 vals = saved_ts["data"][key]
@@ -101,21 +145,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 vals = saved_ts["packetTypes"][key]
                 ts["packetTypes"][key] = deque(vals, maxlen=TS_MAX_POINTS)
 
-    # Register radio callbacks.
-    _register_radio_callbacks(hass, store, connection)
+    # Register radio callbacks (closes over entry_id so signals stay scoped).
+    _register_radio_callbacks(hass, entry.entry_id, store, connection)
 
     # Connect to the radio (retries automatically on failure).
     await connection.async_connect()
 
     # Sync nodes from radio's mesh database and seed time-series snapshots.
-    _sync_nodes_from_radio(hass, store, connection)
+    _sync_nodes_from_radio(hass, entry.entry_id, store, connection)
+
+    entry_id = entry.entry_id
 
     # Start time-series flush timer (runs regardless of frontend connections).
     @callback
     def _flush_timeseries(_now: Any) -> None:
-        ts = hass.data.get(DOMAIN, {}).get("ts")
-        if ts is None:
+        ed = _get_entry_data(hass, entry_id)
+        if ed is None:
             return
+        ts = ed["ts"]
         data = ts["data"]
         snap = ts["snapshots"]
         acc = ts["accumulators"]
@@ -133,7 +180,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ts["packetTypeAccum"] = {k: 0 for k in _PACKET_TYPE_KEYS}
         # Prune stale pending_acks (older than 5 minutes).
         now = time.time()
-        pending = hass.data[DOMAIN].get("pending_acks", {})
+        pending = ed.get("pending_acks", {})
         stale = [k for k, v in pending.items() if now - v.get("_ts", 0) > 300]
         for k in stale:
             del pending[k]
@@ -141,25 +188,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unsub_ts = async_track_time_interval(
         hass, _flush_timeseries, timedelta(seconds=TS_FLUSH_SECONDS)
     )
-    hass.data[DOMAIN]["unsub_callbacks"].append(unsub_ts)
+    entry_data["unsub_callbacks"].append(unsub_ts)
 
     # Persist time-series to disk every 5 minutes.
     async def _persist_timeseries(_now: Any) -> None:
-        ts = hass.data.get(DOMAIN, {}).get("ts")
-        ts_s = hass.data.get(DOMAIN, {}).get("ts_store")
-        if ts and ts_s:
-            await ts_s.async_save(ts)
+        ed = _get_entry_data(hass, entry_id)
+        if ed is None:
+            return
+        await ed["ts_store"].async_save(ed["ts"])
 
     unsub_ts_persist = async_track_time_interval(
         hass, _persist_timeseries, timedelta(seconds=TS_PERSIST_SECONDS)
     )
-    hass.data[DOMAIN]["unsub_callbacks"].append(unsub_ts_persist)
+    entry_data["unsub_callbacks"].append(unsub_ts_persist)
 
-    # Register WebSocket API.
-    async_register_websocket_api(hass)
+    # Register WebSocket API (idempotent — only the first entry actually
+    # registers the commands; later entries reuse the same handlers).
+    if is_first_entry:
+        async_register_websocket_api(hass)
+        await async_register_panel(hass)
 
-    # Register frontend panel.
-    await async_register_panel(hass)
+    # One-time migration: pre-multi-radio releases used a global unique_id
+    # (meshtastic_ui_messages_today / meshtastic_ui_active_nodes) for the
+    # sensors. Rename them to the new per-entry format so the existing
+    # entities (and any automations referencing them) keep working.
+    if is_first_entry:
+        await _migrate_legacy_entity_ids(hass, entry.entry_id)
 
     # Set up sensor platform.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -167,12 +221,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def _migrate_legacy_entity_ids(hass: HomeAssistant, entry_id: str) -> None:
+    """Rename pre-multi-radio sensor unique_ids to include the entry_id."""
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    legacy_to_new = {
+        f"{DOMAIN}_messages_today": f"{DOMAIN}_{entry_id}_messages_today",
+        f"{DOMAIN}_active_nodes": f"{DOMAIN}_{entry_id}_active_nodes",
+    }
+    for legacy, new in legacy_to_new.items():
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, legacy)
+        if entity_id:
+            try:
+                registry.async_update_entity(entity_id, new_unique_id=new)
+                _LOGGER.info(
+                    "Migrated sensor unique_id %s -> %s", legacy, new
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Failed to migrate sensor %s", legacy)
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unload_ok:
-        data = hass.data.pop(DOMAIN, {})
+        domain_data = hass.data.get(DOMAIN, {})
+        entries = domain_data.get("entries", {})
+        data = entries.pop(entry.entry_id, {})
         for unsub in data.get("unsub_callbacks", []):
             unsub()
         # Persist time-series before shutdown.
@@ -183,7 +260,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         connection: MeshtasticConnection | None = data.get("connection")
         if connection is not None:
             await connection.async_disconnect()
-        async_unregister_panel(hass)
+        # Only unregister the panel when the last entry is gone.
+        if not entries:
+            async_unregister_panel(hass)
 
     return unload_ok
 
@@ -220,11 +299,19 @@ def _create_connection(
 @callback
 def _register_radio_callbacks(
     hass: HomeAssistant,
+    entry_id: str,
     store: MeshtasticUiStore,
     connection: MeshtasticConnection,
 ) -> None:
-    """Wire radio callbacks to the store and dispatcher."""
-    unsub_callbacks = hass.data[DOMAIN]["unsub_callbacks"]
+    """Wire radio callbacks to the store and dispatcher.
+
+    All signals dispatched from these callbacks include `entry_id` in the
+    payload so multi-radio subscribers can filter to the right radio.
+    """
+    entry_data = _get_entry_data(hass, entry_id)
+    if entry_data is None:
+        return
+    unsub_callbacks = entry_data["unsub_callbacks"]
 
     @callback
     def _on_packet(packet: dict) -> None:
@@ -233,13 +320,17 @@ def _register_radio_callbacks(
         portnum = decoded.get("portnum")
 
         _LOGGER.debug(
-            "Packet received: portnum=%s from=%s to=%s",
-            portnum, packet.get("fromId"), packet.get("toId"),
+            "Packet received [%s]: portnum=%s from=%s to=%s",
+            entry_id[:8], portnum, packet.get("fromId"), packet.get("toId"),
         )
 
+        ed = _get_entry_data(hass, entry_id)
+        if ed is None:
+            return
+        ts = ed["ts"]
+
         # Count all received packets from other nodes for time-series.
-        ts = hass.data.get(DOMAIN, {}).get("ts")
-        if ts and portnum:
+        if portnum:
             sender_id = packet.get("fromId")
             local_num = ts.get("local_node_num")
             local_id = _num_to_id(local_num) if local_num else None
@@ -250,33 +341,33 @@ def _register_radio_callbacks(
 
         if portnum == "TEXT_MESSAGE_APP":
             _LOGGER.debug("Text message: %r", decoded.get("text", "")[:50])
-            _handle_text_message(hass, store, packet)
+            _handle_text_message(hass, entry_id, store, packet)
 
         # Handle delivery acknowledgements.
         if portnum == "ROUTING_APP":
-            _handle_delivery_ack(hass, packet)
+            _handle_delivery_ack(hass, entry_id, packet)
 
         # Handle traceroute responses.
         if portnum == "TRACEROUTE_APP":
-            _handle_traceroute(hass, store, packet)
+            _handle_traceroute(hass, entry_id, store, packet)
 
         # Handle waypoints.
         if portnum == "WAYPOINT_APP":
-            _handle_waypoint(hass, store, packet)
+            _handle_waypoint(hass, entry_id, store, packet)
 
         # Handle node info responses (name, hardware, etc).
         if portnum == "NODEINFO_APP":
-            _handle_nodeinfo(hass, store, packet)
+            _handle_nodeinfo(hass, entry_id, store, packet)
 
         # Capture LocalStats from our own telemetry.
         if portnum == "TELEMETRY_APP":
             telemetry = decoded.get("telemetry", {})
             local_stats = telemetry.get("localStats")
-            if local_stats and ts:
+            if local_stats:
                 local_num = ts.get("local_node_num")
                 sender_num = packet.get("from")
                 if local_num and sender_num == local_num:
-                    hass.data[DOMAIN]["local_stats"] = local_stats
+                    ed["local_stats"] = local_stats
 
         # Track sender as a node.
         sender_id = packet.get("fromId")
@@ -300,7 +391,7 @@ def _register_radio_callbacks(
             existing = store.get_nodes().get(sender_id, {})
             if not existing.get("name"):
                 now = time.time()
-                cooldowns = hass.data[DOMAIN].get("nodeinfo_cooldowns", {})
+                cooldowns = ed.get("nodeinfo_cooldowns", {})
                 last_req = cooldowns.get(sender_id, 0)
                 if now - last_req > NODEINFO_REQUEST_COOLDOWN:
                     cooldowns[sender_id] = now
@@ -330,11 +421,16 @@ def _register_radio_callbacks(
         node_id = _num_to_id(node_num)
         data = _extract_node_data(node)
         store.update_node(node_id, data)
-        async_dispatcher_send(hass, SIGNAL_NODE_UPDATE, node_id)
+        async_dispatcher_send(
+            hass, SIGNAL_NODE_UPDATE, {"entry_id": entry_id, "node_id": node_id}
+        )
 
         # Capture telemetry snapshots from the local (gateway) node.
-        ts = hass.data.get(DOMAIN, {}).get("ts")
-        if ts and node_num == ts.get("local_node_num"):
+        ed = _get_entry_data(hass, entry_id)
+        if ed is None:
+            return
+        ts = ed["ts"]
+        if node_num == ts.get("local_node_num"):
             metrics = node.get("deviceMetrics", {})
             if metrics.get("channelUtilization") is not None:
                 ts["snapshots"]["channelUtil"] = metrics["channelUtilization"]
@@ -349,16 +445,20 @@ def _register_radio_callbacks(
     ) -> None:
         """Handle connection state changes."""
         _LOGGER.debug(
-            "Meshtastic connection: %s -> %s", old_state, new_state
+            "Meshtastic connection [%s]: %s -> %s", entry_id[:8], old_state, new_state
         )
-        async_dispatcher_send(hass, SIGNAL_CONNECTION_STATE, new_state)
+        async_dispatcher_send(
+            hass,
+            SIGNAL_CONNECTION_STATE,
+            {"entry_id": entry_id, "state": new_state},
+        )
 
         if new_state == ConnectionState.CONNECTED and old_state in (
             ConnectionState.RECONNECTING,
             ConnectionState.CONNECTING,
         ):
             # Re-sync nodes on reconnect.
-            _sync_nodes_from_radio(hass, store, connection)
+            _sync_nodes_from_radio(hass, entry_id, store, connection)
 
     unsub_callbacks.append(connection.register_message_callback(_on_packet))
     unsub_callbacks.append(connection.register_node_update_callback(_on_node_update))
@@ -369,7 +469,7 @@ def _register_radio_callbacks(
 
 @callback
 def _handle_text_message(
-    hass: HomeAssistant, store: MeshtasticUiStore, packet: dict
+    hass: HomeAssistant, entry_id: str, store: MeshtasticUiStore, packet: dict
 ) -> None:
     """Parse a text message packet and route to channel or DM store."""
     decoded = packet.get("decoded", {})
@@ -380,8 +480,9 @@ def _handle_text_message(
     sender_id = normalize_node_id(packet.get("fromId", "unknown"))
 
     # Skip our own outgoing messages — already handled by ws_send_message.
-    ts = hass.data.get(DOMAIN, {}).get("ts")
-    if ts:
+    ed = _get_entry_data(hass, entry_id)
+    if ed:
+        ts = ed["ts"]
         local_num = ts.get("local_node_num")
         if local_num and sender_id == _num_to_id(local_num):
             return
@@ -426,7 +527,7 @@ def _handle_text_message(
         async_dispatcher_send(
             hass,
             SIGNAL_NEW_MESSAGE,
-            {"type": "channel", "channel": channel_key, **message},
+            {"entry_id": entry_id, "type": "channel", "channel": channel_key, **message},
         )
     else:
         # DM — key by the other party's ID.
@@ -434,7 +535,7 @@ def _handle_text_message(
         async_dispatcher_send(
             hass,
             SIGNAL_NEW_MESSAGE,
-            {"type": "dm", "partner": sender_id, **message},
+            {"entry_id": entry_id, "type": "dm", "partner": sender_id, **message},
         )
 
     # Send push notification if enabled.
@@ -483,7 +584,7 @@ def _handle_text_message(
 
 
 @callback
-def _handle_delivery_ack(hass: HomeAssistant, packet: dict) -> None:
+def _handle_delivery_ack(hass: HomeAssistant, entry_id: str, packet: dict) -> None:
     """Handle a routing/ack packet to update message delivery status."""
     decoded = packet.get("decoded", {})
     routing = decoded.get("routing", {})
@@ -492,7 +593,10 @@ def _handle_delivery_ack(hass: HomeAssistant, packet: dict) -> None:
     if not request_id:
         return
 
-    pending = hass.data.get(DOMAIN, {}).get("pending_acks", {})
+    ed = _get_entry_data(hass, entry_id)
+    if ed is None:
+        return
+    pending = ed.get("pending_acks", {})
     if request_id not in pending:
         return
 
@@ -505,14 +609,13 @@ def _handle_delivery_ack(hass: HomeAssistant, packet: dict) -> None:
         status = "delivered"
 
     # Count outgoing packets for time-series.
-    ts = hass.data.get(DOMAIN, {}).get("ts")
-    if ts:
-        ts["accumulators"]["packetTx"] += 1
+    ed["ts"]["accumulators"]["packetTx"] += 1
 
     async_dispatcher_send(
         hass,
         SIGNAL_DELIVERY_STATUS,
         {
+            "entry_id": entry_id,
             "packet_id": request_id,
             "status": status,
             "error": error_reason,
@@ -523,7 +626,7 @@ def _handle_delivery_ack(hass: HomeAssistant, packet: dict) -> None:
 
 @callback
 def _handle_traceroute(
-    hass: HomeAssistant, store: MeshtasticUiStore, packet: dict
+    hass: HomeAssistant, entry_id: str, store: MeshtasticUiStore, packet: dict
 ) -> None:
     """Handle a traceroute response packet."""
     decoded = packet.get("decoded", {})
@@ -568,12 +671,14 @@ def _handle_traceroute(
     store.set_traceroute(from_id, result)
 
     _LOGGER.debug("Traceroute stored: %s -> %s via %d hops", to_id, from_id, len(route_ids))
-    async_dispatcher_send(hass, SIGNAL_TRACEROUTE_RESULT, result)
+    async_dispatcher_send(
+        hass, SIGNAL_TRACEROUTE_RESULT, {"entry_id": entry_id, **result}
+    )
 
 
 @callback
 def _handle_waypoint(
-    hass: HomeAssistant, store: MeshtasticUiStore, packet: dict
+    hass: HomeAssistant, entry_id: str, store: MeshtasticUiStore, packet: dict
 ) -> None:
     """Handle a waypoint packet from the mesh."""
     decoded = packet.get("decoded", {})
@@ -598,7 +703,7 @@ def _handle_waypoint(
         async_dispatcher_send(
             hass,
             SIGNAL_WAYPOINT_UPDATE,
-            {"action": "delete", "waypoint_id": wp_id},
+            {"entry_id": entry_id, "action": "delete", "waypoint_id": wp_id},
         )
         return
 
@@ -614,13 +719,13 @@ def _handle_waypoint(
     async_dispatcher_send(
         hass,
         SIGNAL_WAYPOINT_UPDATE,
-        {"action": "add", "waypoint_id": wp_id, **wp_data},
+        {"entry_id": entry_id, "action": "add", "waypoint_id": wp_id, **wp_data},
     )
 
 
 @callback
 def _handle_nodeinfo(
-    hass: HomeAssistant, store: MeshtasticUiStore, packet: dict
+    hass: HomeAssistant, entry_id: str, store: MeshtasticUiStore, packet: dict
 ) -> None:
     """Handle a NODEINFO_APP packet — extract user identity and update the store."""
     decoded = packet.get("decoded", {})
@@ -645,11 +750,14 @@ def _handle_nodeinfo(
     if data:
         _LOGGER.debug("NodeInfo received for %s: %s", node_id, data)
         store.update_node(node_id, data)
-        async_dispatcher_send(hass, SIGNAL_NODE_UPDATE, node_id)
+        async_dispatcher_send(
+            hass, SIGNAL_NODE_UPDATE, {"entry_id": entry_id, "node_id": node_id}
+        )
 
 
 def _sync_nodes_from_radio(
     hass: HomeAssistant,
+    entry_id: str,
     store: MeshtasticUiStore,
     connection: MeshtasticConnection,
 ) -> None:
@@ -672,8 +780,9 @@ def _sync_nodes_from_radio(
 
     # Seed time-series state from the local (gateway) node.
     my_info = connection.my_info
-    ts = hass.data.get(DOMAIN, {}).get("ts")
-    if my_info and ts:
+    ed = _get_entry_data(hass, entry_id)
+    if my_info and ed:
+        ts = ed["ts"]
         node_num = my_info.get("num")
         if node_num is not None:
             ts["local_node_num"] = node_num

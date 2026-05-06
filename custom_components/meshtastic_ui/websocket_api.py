@@ -39,6 +39,7 @@ _LOGGER = logging.getLogger(__name__)
 
 def async_register_websocket_api(hass: HomeAssistant) -> None:
     """Register all WebSocket commands."""
+    async_register_command(hass, ws_radios)
     async_register_command(hass, ws_gateways)
     async_register_command(hass, ws_messages)
     async_register_command(hass, ws_nodes)
@@ -72,19 +73,99 @@ def async_register_websocket_api(hass: HomeAssistant) -> None:
     async_register_command(hass, ws_clear_all)
 
 
-def _get_store(hass: HomeAssistant) -> MeshtasticUiStore:
-    """Get the store instance."""
-    return hass.data[DOMAIN]["store"]
+def _get_entries(hass: HomeAssistant) -> dict[str, dict[str, Any]]:
+    """Return the per-entry data map, supporting both old and new shapes."""
+    domain_data = hass.data.get(DOMAIN, {})
+    # New per-entry shape.
+    if "entries" in domain_data:
+        return domain_data["entries"]
+    # Legacy shape (test fixtures may still build the old singleton dict).
+    if "store" in domain_data or "connection" in domain_data:
+        return {"_legacy": domain_data}
+    return {}
 
 
-def _get_connection(hass: HomeAssistant) -> MeshtasticConnection:
-    """Get the connection instance."""
-    return hass.data[DOMAIN]["connection"]
+def _get_entry_data(
+    hass: HomeAssistant, entry_id: str | None = None
+) -> dict[str, Any] | None:
+    """Return the per-entry data dict, defaulting to the first entry."""
+    entries = _get_entries(hass)
+    if entry_id is not None:
+        return entries.get(entry_id)
+    if not entries:
+        return None
+    return next(iter(entries.values()))
+
+
+def _get_store(
+    hass: HomeAssistant, entry_id: str | None = None
+) -> MeshtasticUiStore:
+    """Get the store instance for an entry (or the only one if unspecified)."""
+    data = _get_entry_data(hass, entry_id)
+    if data is None:
+        raise RuntimeError("No Meshtastic UI entry available")
+    return data["store"]
+
+
+def _get_connection(
+    hass: HomeAssistant, entry_id: str | None = None
+) -> MeshtasticConnection:
+    """Get the connection instance for an entry (or the only one if unspecified)."""
+    data = _get_entry_data(hass, entry_id)
+    if data is None:
+        raise RuntimeError("No Meshtastic UI entry available")
+    return data["connection"]
+
+
+def _radio_id_field() -> dict:
+    """Voluptuous fragment for the optional radio_id field on every command."""
+    return {vol.Optional("radio_id"): vol.Any(str, None)}
+
+
+@websocket_command(
+    {
+        vol.Required("type"): f"{WS_PREFIX}/radios",
+    }
+)
+@async_response
+async def ws_radios(
+    hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """List all configured Meshtastic radios with their connection info."""
+    entries = _get_entries(hass)
+    radios: list[dict[str, Any]] = []
+    for entry_id, data in entries.items():
+        if entry_id == "_legacy":
+            # Test fixture using the old singleton shape.
+            radios.append({
+                "radio_id": "_legacy",
+                "title": "Meshtastic Radio",
+                "connection_type": None,
+                "address": None,
+                "state": None,
+            })
+            continue
+        conn = data.get("connection")
+        config = data.get("config", {})
+        radios.append({
+            "radio_id": entry_id,
+            "title": data.get("title") or "Meshtastic Radio",
+            "connection_type": config.get("connection_type"),
+            "address": (
+                config.get("ble_address")
+                or config.get("tcp_hostname")
+                or config.get("serial_dev_path")
+            ),
+            "state": str(conn.state) if conn is not None else None,
+        })
+    connection.send_result(msg["id"], {"radios": radios})
 
 
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/gateways",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @async_response
@@ -92,7 +173,7 @@ async def ws_gateways(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return our radio's info as the gateway."""
-    conn = _get_connection(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
     gateways: list[dict[str, Any]] = []
 
     my_info = conn.my_info
@@ -136,7 +217,8 @@ async def ws_gateways(
         sensors["uptime"] = device_metrics["uptimeSeconds"]
 
     # Packet counters from LocalStats telemetry.
-    local_stats = hass.data.get(DOMAIN, {}).get("local_stats", {})
+    entry_data = _get_entry_data(hass, msg.get("radio_id")) or {}
+    local_stats = entry_data.get("local_stats", {})
     if local_stats.get("numPacketsTx") is not None:
         sensors["packets_tx"] = local_stats["numPacketsTx"]
     if local_stats.get("numPacketsRx") is not None:
@@ -201,6 +283,7 @@ async def ws_gateways(
     gateways.append(
         {
             "entity_id": None,
+            "radio_id": entry_data.get("entry_id") if entry_data else None,
             "name": name,
             "state": state,
             "model": model,
@@ -219,6 +302,8 @@ async def ws_gateways(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/messages",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Optional("entity_id"): str,
     }
 )
@@ -227,7 +312,7 @@ async def ws_messages(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return stored messages, optionally filtered."""
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     entity_id = msg.get("entity_id")
 
     if entity_id:
@@ -250,6 +335,8 @@ async def ws_messages(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/nodes",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @async_response
@@ -257,7 +344,7 @@ async def ws_nodes(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return all tracked nodes."""
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     connection.send_result(
         msg["id"],
         {
@@ -271,6 +358,8 @@ async def ws_nodes(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/stats",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @async_response
@@ -278,7 +367,7 @@ async def ws_stats(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return summary statistics."""
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     connection.send_result(
         msg["id"],
         {
@@ -293,6 +382,8 @@ async def ws_stats(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/subscribe",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @callback
@@ -300,10 +391,13 @@ def ws_subscribe(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Subscribe to real-time message updates."""
+    radio_id = msg.get("radio_id")
 
     @callback
     def _forward_message(message_data: dict[str, Any]) -> None:
-        """Forward new message to the subscriber."""
+        """Forward new message to the subscriber, filtered by radio_id."""
+        if radio_id and message_data.get("entry_id") != radio_id:
+            return
         connection.send_event(msg["id"], message_data)
 
     unsub = async_dispatcher_connect(hass, SIGNAL_NEW_MESSAGE, _forward_message)
@@ -314,6 +408,8 @@ def ws_subscribe(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/subscribe_nodes",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @callback
@@ -321,11 +417,27 @@ def ws_subscribe_nodes(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Subscribe to real-time node updates."""
+    radio_id = msg.get("radio_id")
 
     @callback
-    def _forward_node_update(node_id: str) -> None:
-        """Forward node update to the subscriber."""
-        store = _get_store(hass)
+    def _forward_node_update(payload: Any) -> None:
+        """Forward node update to the subscriber, filtered by radio_id."""
+        # Payload is now {"entry_id": ..., "node_id": ...}; old code may
+        # still pass a bare string node_id, so handle both shapes.
+        if isinstance(payload, dict):
+            event_entry_id = payload.get("entry_id")
+            node_id = payload.get("node_id")
+        else:
+            event_entry_id = None
+            node_id = payload
+        if radio_id and event_entry_id and event_entry_id != radio_id:
+            return
+        if not node_id:
+            return
+        try:
+            store = _get_store(hass, radio_id or event_entry_id)
+        except RuntimeError:
+            return
         node_data = store.get_nodes().get(node_id, {})
         connection.send_event(
             msg["id"], {"node_id": node_id, "data": node_data}
@@ -339,6 +451,8 @@ def ws_subscribe_nodes(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/subscribe_delivery",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @callback
@@ -346,10 +460,13 @@ def ws_subscribe_delivery(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Subscribe to message delivery status updates (ack/fail)."""
+    radio_id = msg.get("radio_id")
 
     @callback
     def _forward_delivery(data: dict[str, Any]) -> None:
-        """Forward delivery status to the subscriber."""
+        """Forward delivery status, filtered by radio_id."""
+        if radio_id and data.get("entry_id") != radio_id:
+            return
         connection.send_event(msg["id"], data)
 
     unsub = async_dispatcher_connect(
@@ -362,6 +479,8 @@ def ws_subscribe_delivery(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/send_message",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Required("text"): str,
         vol.Optional("channel"): int,
         vol.Optional("to"): str,
@@ -375,8 +494,8 @@ async def ws_send_message(
     """Send a message via the radio."""
     from datetime import datetime, timezone
 
-    conn = _get_connection(hass)
-    store = _get_store(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
+    store = _get_store(hass, msg.get("radio_id"))
     text = msg["text"]
     channel = msg.get("channel", 0)
     to = msg.get("to")
@@ -450,6 +569,8 @@ async def ws_send_message(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/call_service",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Required("service"): vol.In({"trace_route", "request_position", "request_nodeinfo"}),
         vol.Optional("service_data"): dict,
     }
@@ -459,7 +580,7 @@ async def ws_call_service(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Execute a radio command (trace_route, request_position, request_nodeinfo)."""
-    conn = _get_connection(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
     service = msg["service"]
     service_data = msg.get("service_data", {})
 
@@ -508,6 +629,8 @@ async def ws_call_service(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/connection_status",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @async_response
@@ -515,7 +638,7 @@ async def ws_connection_status(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return the current radio connection state."""
-    conn = _get_connection(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
     connection.send_result(
         msg["id"],
         {
@@ -528,6 +651,8 @@ async def ws_connection_status(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/get_config",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @async_response
@@ -538,7 +663,7 @@ async def ws_get_config(
     if not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    conn = _get_connection(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
     try:
         config = await conn.async_get_config()
         connection.send_result(msg["id"], config)
@@ -550,6 +675,8 @@ async def ws_get_config(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/set_config",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Required("section"): str,
         vol.Required("values"): dict,
     }
@@ -562,7 +689,7 @@ async def ws_set_config(
     if not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    conn = _get_connection(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
     try:
         await conn.async_set_config(msg["section"], msg["values"])
         connection.send_result(msg["id"], {"success": True})
@@ -574,6 +701,8 @@ async def ws_set_config(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/get_channels",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @async_response
@@ -581,7 +710,7 @@ async def ws_get_channels(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return channel config from the radio."""
-    conn = _get_connection(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
     try:
         config = await conn.async_get_config()
         connection.send_result(msg["id"], {"channels": config.get("channels", [])})
@@ -593,6 +722,8 @@ async def ws_get_channels(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/set_channel",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Required("index"): vol.All(int, vol.Range(min=0, max=7)),
         vol.Required("settings"): dict,
     }
@@ -605,7 +736,7 @@ async def ws_set_channel(
     if not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    conn = _get_connection(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
     try:
         await conn.async_set_channel(msg["index"], msg["settings"])
         connection.send_result(msg["id"], {"success": True})
@@ -617,6 +748,8 @@ async def ws_set_channel(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/set_owner",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Optional("long_name"): str,
         vol.Optional("short_name"): str,
         vol.Optional("is_licensed"): bool,
@@ -630,7 +763,7 @@ async def ws_set_owner(
     if not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    conn = _get_connection(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
     try:
         await conn.async_set_owner(
             long_name=msg.get("long_name"),
@@ -646,6 +779,8 @@ async def ws_set_owner(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/device_action",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Required("action"): vol.In({"factory_reset_config", "factory_reset_device", "reboot", "reboot_ota", "reset_nodedb", "shutdown"}),
         vol.Optional("params"): dict,
     }
@@ -658,7 +793,7 @@ async def ws_device_action(
     if not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    conn = _get_connection(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
     try:
         params = msg.get("params") or {}
         seconds = min(max(int(params.get("seconds", 5)), 1), 300)
@@ -672,6 +807,8 @@ async def ws_device_action(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/node_admin",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Required("node_id"): str,
         vol.Required("action"): vol.In({"favorite", "ignore", "remove", "unfavorite", "unignore"}),
     }
@@ -685,8 +822,8 @@ async def ws_node_admin(
     if action == "remove" and not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    conn = _get_connection(hass)
-    store = _get_store(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
+    store = _get_store(hass, msg.get("radio_id"))
     node_id = msg["node_id"]
     try:
         await conn.async_node_admin(node_id, action)
@@ -712,6 +849,8 @@ async def ws_node_admin(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/get_waypoints",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @async_response
@@ -719,13 +858,15 @@ async def ws_get_waypoints(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return all stored waypoints."""
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     connection.send_result(msg["id"], {"waypoints": store.get_waypoints()})
 
 
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/send_waypoint",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Required("latitude"): vol.Coerce(float),
         vol.Required("longitude"): vol.Coerce(float),
         vol.Optional("name"): str,
@@ -738,8 +879,8 @@ async def ws_send_waypoint(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Send a waypoint to the mesh and store it."""
-    conn = _get_connection(hass)
-    store = _get_store(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
+    store = _get_store(hass, msg.get("radio_id"))
     try:
         wp_id = await conn.async_send_waypoint(
             latitude=msg["latitude"],
@@ -775,6 +916,8 @@ async def ws_send_waypoint(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/delete_waypoint",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Required("waypoint_id"): int,
     }
 )
@@ -783,8 +926,8 @@ async def ws_delete_waypoint(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Delete a waypoint from the mesh and store."""
-    conn = _get_connection(hass)
-    store = _get_store(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
+    store = _get_store(hass, msg.get("radio_id"))
     wp_id = msg["waypoint_id"]
     try:
         await conn.async_delete_waypoint(wp_id)
@@ -805,6 +948,8 @@ async def ws_delete_waypoint(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/subscribe_waypoints",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @callback
@@ -812,9 +957,12 @@ def ws_subscribe_waypoints(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Subscribe to waypoint updates."""
+    radio_id = msg.get("radio_id")
 
     @callback
     def _forward_waypoint(data: dict[str, Any]) -> None:
+        if radio_id and data.get("entry_id") != radio_id:
+            return
         connection.send_event(msg["id"], data)
 
     unsub = async_dispatcher_connect(hass, SIGNAL_WAYPOINT_UPDATE, _forward_waypoint)
@@ -825,6 +973,8 @@ def ws_subscribe_waypoints(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/get_traceroutes",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @async_response
@@ -832,13 +982,15 @@ async def ws_get_traceroutes(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return all stored traceroute results."""
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     connection.send_result(msg["id"], {"traceroutes": store.get_all_traceroutes()})
 
 
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/subscribe_traceroutes",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @callback
@@ -846,9 +998,12 @@ def ws_subscribe_traceroutes(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Subscribe to traceroute result updates."""
+    radio_id = msg.get("radio_id")
 
     @callback
     def _forward_traceroute(data: dict[str, Any]) -> None:
+        if radio_id and data.get("entry_id") != radio_id:
+            return
         connection.send_event(msg["id"], data)
 
     unsub = async_dispatcher_connect(
@@ -861,6 +1016,8 @@ def ws_subscribe_traceroutes(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/get_notification_prefs",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @async_response
@@ -868,13 +1025,15 @@ async def ws_get_notification_prefs(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return notification preferences."""
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     connection.send_result(msg["id"], store.get_notification_prefs())
 
 
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/set_notification_prefs",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Optional("enabled"): bool,
         vol.Optional("service"): vol.Match(r"^\w+\.\w+$"),
         vol.Optional("filter"): vol.In({"all", "channel", "dm"}),
@@ -888,7 +1047,7 @@ async def ws_set_notification_prefs(
     if not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     prefs: dict[str, Any] = {}
     if "enabled" in msg:
         prefs["enabled"] = msg["enabled"]
@@ -924,6 +1083,8 @@ def _downsample(values: list[float], factor: int, is_counter: bool) -> list[floa
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/reconnect",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
     }
 )
 @async_response
@@ -938,7 +1099,7 @@ async def ws_reconnect(
     if not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    conn = _get_connection(hass)
+    conn = _get_connection(hass, msg.get("radio_id"))
     try:
         await conn.async_force_reconnect()
         connection.send_result(msg["id"], {"success": True})
@@ -949,6 +1110,8 @@ async def ws_reconnect(
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/get_timeseries",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Optional("window", default=3600): vol.All(
             vol.Coerce(int), vol.Range(min=60, max=604800)
         ),
@@ -1008,13 +1171,15 @@ async def ws_storage_stats(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Return counts for the Storage settings panel."""
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     connection.send_result(msg["id"], store.stats())
 
 
 @websocket_command(
     {
         vol.Required("type"): f"{WS_PREFIX}/clear_messages",
+
+        vol.Optional("radio_id"): vol.Any(str, None),
         vol.Optional("conversation"): vol.Any(str, None),
     }
 )
@@ -1026,7 +1191,7 @@ async def ws_clear_messages(
     if not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     removed = store.clear_messages(msg.get("conversation"))
     connection.send_result(msg["id"], {"removed": removed})
 
@@ -1040,7 +1205,7 @@ async def ws_clear_nodes(
     if not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     removed = store.clear_nodes()
     connection.send_result(msg["id"], {"removed": removed})
 
@@ -1054,6 +1219,6 @@ async def ws_clear_all(
     if not connection.user.is_admin:
         connection.send_error(msg["id"], "unauthorized", "Admin access required")
         return
-    store = _get_store(hass)
+    store = _get_store(hass, msg.get("radio_id"))
     counts = store.clear_all()
     connection.send_result(msg["id"], counts)

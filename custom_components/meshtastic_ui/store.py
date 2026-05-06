@@ -42,10 +42,31 @@ def normalize_node_id(node_id: str) -> str:
 class MeshtasticUiStore:
     """Persistent store for messages and node data."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
-        """Initialize the store."""
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry_id: str | None = None,
+        migrate_legacy: bool = False,
+    ) -> None:
+        """Initialize the store.
+
+        Each config entry gets its own storage file (`<key>.<entry_id>`)
+        so multiple radios don't clobber each other. When `migrate_legacy`
+        is True (set on the first entry to load), we'll fall back to the
+        legacy global key on initial load and persist forward to the new
+        per-entry key on the next save.
+        """
         self._hass = hass
-        self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._entry_id = entry_id
+        self._migrate_legacy = migrate_legacy
+        key = f"{STORAGE_KEY}.{entry_id}" if entry_id else STORAGE_KEY
+        self._store = Store(hass, STORAGE_VERSION, key)
+        # Legacy fallback: read-only access for migration purposes.
+        self._legacy_store: Store | None = (
+            Store(hass, STORAGE_VERSION, STORAGE_KEY)
+            if migrate_legacy and entry_id
+            else None
+        )
         self._channel_messages: dict[str, deque[dict[str, Any]]] = {}
         self._dm_messages: dict[str, deque[dict[str, Any]]] = {}
         self._nodes: dict[str, dict[str, Any]] = {}
@@ -64,6 +85,13 @@ class MeshtasticUiStore:
     async def async_load(self) -> None:
         """Load stored data from disk."""
         data = await self._store.async_load()
+        # First-entry migration: if our per-entry file is empty but the
+        # pre-multi-radio global file exists, claim that data for this entry
+        # and schedule a save under the new key.
+        if data is None and self._legacy_store is not None:
+            data = await self._legacy_store.async_load()
+            if data is not None:
+                self._schedule_save()
         if data is None:
             return
 
@@ -416,17 +444,33 @@ class MeshtasticUiStore:
 class TimeSeriesStore:
     """Separate persistent store for time-series chart data."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry_id: str | None = None,
+        migrate_legacy: bool = False,
+    ) -> None:
         self._hass = hass
-        self._store = Store(hass, TS_STORAGE_VERSION, TS_STORAGE_KEY)
+        key = f"{TS_STORAGE_KEY}.{entry_id}" if entry_id else TS_STORAGE_KEY
+        self._store = Store(hass, TS_STORAGE_VERSION, key)
+        self._legacy_store: Store | None = (
+            Store(hass, TS_STORAGE_VERSION, TS_STORAGE_KEY)
+            if migrate_legacy and entry_id
+            else None
+        )
 
     async def async_load(self) -> dict[str, dict[str, list[float]]] | None:
         """Load time-series data from disk.
 
         Returns a dict with 'data' and 'packetTypes' keys, each mapping
         series name to a list of floats, or None if no saved data.
+        Falls back to the pre-multi-radio global key on first load if
+        per-entry data is missing (one-time migration).
         """
-        return await self._store.async_load()
+        data = await self._store.async_load()
+        if data is None and self._legacy_store is not None:
+            data = await self._legacy_store.async_load()
+        return data
 
     async def async_save(self, ts_dict: dict[str, Any]) -> None:
         """Immediately save time-series data to disk."""

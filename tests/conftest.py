@@ -110,11 +110,16 @@ _PACKET_TYPE_KEYS = ("nodeinfo", "other", "position", "routing", "telemetry", "t
 def hass_data(store: MeshtasticUiStore, mock_connection: MagicMock) -> dict:
     """Create a minimal hass.data[DOMAIN] dict for testing handlers."""
     return {
+        "entry_id": "_legacy",
+        "title": "Meshtastic Radio",
+        "config": {},
         "store": store,
         "ts_store": MagicMock(),
         "connection": mock_connection,
         "unsub_callbacks": [],
         "pending_acks": {},
+        "nodeinfo_cooldowns": {},
+        "local_stats": {},
         "ts": {
             "data": {k: deque(maxlen=TS_MAX_POINTS) for k in _TS_SERIES_KEYS},
             "packetTypes": {k: deque(maxlen=TS_MAX_POINTS) for k in _PACKET_TYPE_KEYS},

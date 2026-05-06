@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
@@ -19,28 +21,51 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up Meshtastic UI sensors."""
-    store: MeshtasticUiStore = hass.data[DOMAIN]["store"]
+    domain_data = hass.data.get(DOMAIN, {})
+    entries = domain_data.get("entries", {})
+    entry_data = entries.get(entry.entry_id)
+    # Backwards-compat for tests that still build the old singleton dict.
+    if entry_data is None and "store" in domain_data:
+        entry_data = domain_data
+    if entry_data is None:
+        return
+    store: MeshtasticUiStore = entry_data["store"]
     async_add_entities(
         [
-            MeshMessagesTodaySensor(store),
-            MeshActiveNodesSensor(store),
+            MeshMessagesTodaySensor(store, entry.entry_id),
+            MeshActiveNodesSensor(store, entry.entry_id),
         ]
     )
 
 
-class MeshMessagesTodaySensor(SensorEntity):
-    """Sensor tracking total messages received today."""
+class _PerEntrySensor(SensorEntity):
+    """Base for sensors that filter signal payloads by entry_id."""
 
     _attr_has_entity_name = True
+
+    def __init__(self, store: MeshtasticUiStore, entry_id: str) -> None:
+        self._store = store
+        self._entry_id = entry_id
+
+    @callback
+    def _matches_entry(self, data: Any) -> bool:
+        if isinstance(data, dict):
+            event_entry_id = data.get("entry_id")
+            return event_entry_id is None or event_entry_id == self._entry_id
+        return True
+
+
+class MeshMessagesTodaySensor(_PerEntrySensor):
+    """Sensor tracking total messages received today."""
+
     _attr_name = "Messages Today"
-    _attr_unique_id = f"{DOMAIN}_messages_today"
     _attr_icon = "mdi:message-text"
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_native_unit_of_measurement = "messages"
 
-    def __init__(self, store: MeshtasticUiStore) -> None:
-        """Initialize the sensor."""
-        self._store = store
+    def __init__(self, store: MeshtasticUiStore, entry_id: str) -> None:
+        super().__init__(store, entry_id)
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_messages_today"
 
     @property
     def native_value(self) -> int:
@@ -56,24 +81,24 @@ class MeshMessagesTodaySensor(SensorEntity):
         )
 
     @callback
-    def _handle_new_message(self, _data: dict) -> None:
-        """Update when a new message arrives."""
+    def _handle_new_message(self, data: Any) -> None:
+        """Update when a new message arrives for this entry's radio."""
+        if not self._matches_entry(data):
+            return
         self.async_write_ha_state()
 
 
-class MeshActiveNodesSensor(SensorEntity):
+class MeshActiveNodesSensor(_PerEntrySensor):
     """Sensor tracking active nodes (seen within 1 hour)."""
 
-    _attr_has_entity_name = True
     _attr_name = "Active Nodes"
-    _attr_unique_id = f"{DOMAIN}_active_nodes"
     _attr_icon = "mdi:access-point-network"
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "nodes"
 
-    def __init__(self, store: MeshtasticUiStore) -> None:
-        """Initialize the sensor."""
-        self._store = store
+    def __init__(self, store: MeshtasticUiStore, entry_id: str) -> None:
+        super().__init__(store, entry_id)
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_active_nodes"
 
     @property
     def native_value(self) -> int:
@@ -89,6 +114,8 @@ class MeshActiveNodesSensor(SensorEntity):
         )
 
     @callback
-    def _handle_update(self, _data: dict) -> None:
-        """Refresh when activity occurs."""
+    def _handle_update(self, data: Any) -> None:
+        """Refresh when activity occurs for this entry's radio."""
+        if not self._matches_entry(data):
+            return
         self.async_write_ha_state()

@@ -101,9 +101,6 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Step 1: Choose connection type."""
-        if self._async_current_entries():
-            return self.async_abort(reason="already_configured")
-
         if user_input is not None:
             self._connection_type = user_input[CONF_CONNECTION_TYPE]
             if self._connection_type == "tcp":
@@ -156,8 +153,6 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Confirm Bluetooth discovery."""
         if user_input is not None:
-            if self._async_current_entries():
-                return self.async_abort(reason="already_configured")
             return self.async_create_entry(
                 title=f"Meshtastic (BLE {self._discovered_name})",
                 data={
@@ -198,6 +193,8 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
         self.context["title_placeholders"] = {
             "name": self._discovered_name,
             "address": f"{host}:{port}",
+            "rssi": "TCP",
+            "last4": "",
         }
 
         return await self.async_step_zeroconf_confirm()
@@ -209,8 +206,6 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            if self._async_current_entries():
-                return self.async_abort(reason="already_configured")
             error = await self._async_validate_tcp(
                 self._discovered_host, self._discovered_port
             )
@@ -248,6 +243,8 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
             if error:
                 errors["base"] = error
             else:
+                await self.async_set_unique_id(f"tcp:{hostname}")
+                self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=f"Meshtastic ({hostname})",
                     data={
@@ -279,6 +276,8 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
             if error:
                 errors["base"] = error
             else:
+                await self.async_set_unique_id(f"serial:{dev_path}")
+                self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=f"Meshtastic ({dev_path})",
                     data={
@@ -316,6 +315,8 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
             if error:
                 errors["base"] = error
             else:
+                await self.async_set_unique_id(address)
+                self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=f"Meshtastic (BLE {address})",
                     data={
@@ -371,6 +372,8 @@ class MeshtasticUiConfigFlow(ConfigFlow, domain=DOMAIN):
             if error:
                 errors["base"] = error
             else:
+                await self.async_set_unique_id(address)
+                self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=f"Meshtastic (BLE {address})",
                     data={

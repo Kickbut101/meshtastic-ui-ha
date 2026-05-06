@@ -72,6 +72,8 @@ class MeshtasticUiPanel extends LitElement {
       _nodeDialogFeedback: { type: String },
       _showReconnectBanner: { type: Boolean },
       _reconnecting: { type: Boolean },
+      _radios: { type: Array },
+      _selectedRadioId: { type: String },
     };
   }
 
@@ -103,6 +105,8 @@ class MeshtasticUiPanel extends LitElement {
     this._nodeDialogFeedback = "";
     this._showReconnectBanner = false;
     this._reconnecting = false;
+    this._radios = [];
+    this._selectedRadioId = localStorage.getItem("meshtastic_selected_radio") || null;
     this._wsFailCount = 0;
     this._timeSeries = null;
     this._packetTypes = null;
@@ -193,6 +197,9 @@ class MeshtasticUiPanel extends LitElement {
 
   async _loadData() {
     this._deliveryStatuses = {};
+    // Load the list of configured radios first so subsequent commands can
+    // tag themselves with the right radio_id.
+    await this._loadRadios();
     await this._loadGateways();
     await this._loadMessages();
     await this._loadNodes();
@@ -206,7 +213,14 @@ class MeshtasticUiPanel extends LitElement {
   async _wsCommand(type, data = {}) {
     if (!this.hass) return null;
     try {
-      const result = await this.hass.callWS({ type, ...data });
+      // Inject the currently selected radio_id so backend routes the
+      // request to the right config entry. The /radios command itself
+      // doesn't take a radio_id; everything else does.
+      const payload = { type, ...data };
+      if (this._selectedRadioId && type !== "meshtastic_ui/radios") {
+        payload.radio_id = this._selectedRadioId;
+      }
+      const result = await this.hass.callWS(payload);
       if (this._wsFailCount > 0) {
         this._wsFailCount = 0;
         this._showReconnectBanner = false;
@@ -217,6 +231,42 @@ class MeshtasticUiPanel extends LitElement {
       if (this._wsFailCount >= 2) this._showReconnectBanner = true;
       return null;
     }
+  }
+
+  async _loadRadios() {
+    const result = await this._wsCommand("meshtastic_ui/radios");
+    if (!result) return;
+    this._radios = result.radios || [];
+    // Pick a sensible default selection.
+    const ids = this._radios.map((r) => r.radio_id);
+    if (!this._selectedRadioId || !ids.includes(this._selectedRadioId)) {
+      this._selectedRadioId = ids[0] || null;
+      if (this._selectedRadioId) {
+        localStorage.setItem("meshtastic_selected_radio", this._selectedRadioId);
+      }
+    }
+  }
+
+  async _switchRadio(radioId) {
+    if (!radioId || radioId === this._selectedRadioId) return;
+    this._selectedRadioId = radioId;
+    localStorage.setItem("meshtastic_selected_radio", radioId);
+    // Drop in-memory state so we don't render stale data while reloading.
+    this._messages = {};
+    this._channels = [];
+    this._dms = [];
+    this._channelNames = {};
+    this._nodes = {};
+    this._waypoints = {};
+    this._traceroutes = {};
+    this._gateways = [];
+    this._timeSeries = null;
+    this._packetTypes = null;
+    this._localNodeId = "";
+    // Re-establish subscriptions for the new radio.
+    await this._unsubscribe();
+    this._resetSubscriptions();
+    await this._loadData();
   }
 
   async _handleReconnectClick() {
@@ -324,10 +374,13 @@ class MeshtasticUiPanel extends LitElement {
       this[key] = unsub;
     };
 
+    const radioId = this._selectedRadioId;
+    const sub = (subType) => ({ type: subType, ...(radioId ? { radio_id: radioId } : {}) });
+
     if (!this._unsubscribeFn) {
       conn.subscribeMessage(
         (event) => this._handleRealtimeMessage(event),
-        { type: "meshtastic_ui/subscribe" }
+        sub("meshtastic_ui/subscribe")
       )
       .then(safeThen("_unsubscribeFn"))
       .catch((err) => console.warn("Subscribe failed:", err));
@@ -336,7 +389,7 @@ class MeshtasticUiPanel extends LitElement {
     if (!this._unsubNodesFn) {
       conn.subscribeMessage(
         (event) => this._handleNodeUpdate(event),
-        { type: "meshtastic_ui/subscribe_nodes" }
+        sub("meshtastic_ui/subscribe_nodes")
       )
       .then(safeThen("_unsubNodesFn"))
       .catch((err) => console.warn("Subscribe nodes failed:", err));
@@ -345,7 +398,7 @@ class MeshtasticUiPanel extends LitElement {
     if (!this._unsubDeliveryFn) {
       conn.subscribeMessage(
         (event) => this._handleDeliveryStatus(event),
-        { type: "meshtastic_ui/subscribe_delivery" }
+        sub("meshtastic_ui/subscribe_delivery")
       )
       .then(safeThen("_unsubDeliveryFn"))
       .catch((err) => console.warn("Subscribe delivery failed:", err));
@@ -354,7 +407,7 @@ class MeshtasticUiPanel extends LitElement {
     if (!this._unsubWaypointsFn) {
       conn.subscribeMessage(
         (event) => this._handleWaypointUpdate(event),
-        { type: "meshtastic_ui/subscribe_waypoints" }
+        sub("meshtastic_ui/subscribe_waypoints")
       )
       .then(safeThen("_unsubWaypointsFn"))
       .catch((err) => console.warn("Subscribe waypoints failed:", err));
@@ -363,7 +416,7 @@ class MeshtasticUiPanel extends LitElement {
     if (!this._unsubTraceroutesFn) {
       conn.subscribeMessage(
         (event) => this._handleTracerouteResult(event),
-        { type: "meshtastic_ui/subscribe_traceroutes" }
+        sub("meshtastic_ui/subscribe_traceroutes")
       )
       .then(safeThen("_unsubTraceroutesFn"))
       .catch((err) => console.warn("Subscribe traceroutes failed:", err));
@@ -755,6 +808,19 @@ class MeshtasticUiPanel extends LitElement {
         line-height: 1; box-sizing: border-box;
       }
 
+      .radio-picker {
+        align-self: center;
+        padding: 4px 8px;
+        margin-right: 8px;
+        border: 1px solid var(--divider-color);
+        border-radius: 6px;
+        background: var(--card-background-color);
+        color: var(--primary-text-color);
+        font-size: 13px;
+        cursor: pointer;
+        max-width: 180px;
+      }
+      .radio-picker:focus { outline: none; border-color: var(--primary-color); }
       .bell-icon {
         display: flex; align-items: center; padding: 12px;
         cursor: pointer; color: var(--secondary-text-color);
@@ -980,6 +1046,19 @@ class MeshtasticUiPanel extends LitElement {
           `;
         })}
         <div style="flex:1;"></div>
+        ${this._radios.length > 1 ? html`
+          <select class="radio-picker"
+            .value=${this._selectedRadioId || ""}
+            @change=${(e) => this._switchRadio(e.target.value)}
+            title="Switch active radio"
+          >
+            ${this._radios.map((r) => html`
+              <option value=${r.radio_id} ?selected=${r.radio_id === this._selectedRadioId}>
+                ${r.title || "Meshtastic Radio"}
+              </option>
+            `)}
+          </select>
+        ` : ""}
         <div class="tab bell-icon" @click=${() => { this._showNotificationModal = true; }}>
           <ha-icon icon="mdi:${this._notificationPrefs.enabled ? "bell" : "bell-outline"}"
             style="--mdc-icon-size: 20px;"></ha-icon>

@@ -111,7 +111,7 @@ class TestHandleTextMessage:
             "toId": "^all",
             "channel": 0,
         }
-        _handle_text_message(hass, store, packet)
+        _handle_text_message(hass, "_legacy", store, packet)
         await hass.async_block_till_done()
 
         msgs = store.get_channel_messages("0")
@@ -131,7 +131,7 @@ class TestHandleTextMessage:
             "toId": "!12345678",
             "channel": 0,
         }
-        _handle_text_message(hass, store, packet)
+        _handle_text_message(hass, "_legacy", store, packet)
         await hass.async_block_till_done()
 
         msgs = store.get_dm_messages("!aabbccdd")
@@ -149,7 +149,7 @@ class TestHandleTextMessage:
             "toId": "^all",
             "channel": 0,
         }
-        _handle_text_message(hass, store, packet)
+        _handle_text_message(hass, "_legacy", store, packet)
         assert store.get_channel_messages("0") == []
 
     async def test_empty_text_ignored(self, hass: HomeAssistant, store: MeshtasticUiStore, hass_data: dict):
@@ -160,7 +160,7 @@ class TestHandleTextMessage:
             "toId": "^all",
             "channel": 0,
         }
-        _handle_text_message(hass, store, packet)
+        _handle_text_message(hass, "_legacy", store, packet)
         assert store.get_channel_messages("0") == []
 
 
@@ -181,7 +181,7 @@ class TestHandleDeliveryAck:
             "decoded": {"routing": {"errorReason": "NONE"}, "portnum": "ROUTING_APP"},
             "requestId": 42,
         }
-        _handle_delivery_ack(hass, packet)
+        _handle_delivery_ack(hass, "_legacy", packet)
         await hass.async_block_till_done()
 
         assert len(received) == 1
@@ -198,7 +198,7 @@ class TestHandleDeliveryAck:
             "decoded": {"routing": {"errorReason": "NO_RESPONSE"}, "portnum": "ROUTING_APP"},
             "requestId": 42,
         }
-        _handle_delivery_ack(hass, packet)
+        _handle_delivery_ack(hass, "_legacy", packet)
         await hass.async_block_till_done()
 
         assert received[0]["status"] == "failed"
@@ -209,12 +209,12 @@ class TestHandleDeliveryAck:
             "decoded": {"routing": {"errorReason": "NONE"}, "portnum": "ROUTING_APP"},
             "requestId": 999,
         }
-        _handle_delivery_ack(hass, packet)  # Should not raise
+        _handle_delivery_ack(hass, "_legacy", packet)  # Should not raise
 
     async def test_no_request_id_ignored(self, hass: HomeAssistant, hass_data: dict):
         hass.data[DOMAIN] = hass_data
         packet = {"decoded": {"routing": {}}}
-        _handle_delivery_ack(hass, packet)
+        _handle_delivery_ack(hass, "_legacy", packet)
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ class TestHandleTraceroute:
             "fromId": "!aabbccdd",
             "toId": "!12345678",
         }
-        _handle_traceroute(hass, store, packet)
+        _handle_traceroute(hass, "_legacy", store, packet)
         await hass.async_block_till_done()
 
         result = store.get_traceroute("!aabbccdd")
@@ -253,7 +253,7 @@ class TestHandleTraceroute:
     async def test_missing_ids_skipped(self, hass: HomeAssistant, store: MeshtasticUiStore, hass_data: dict):
         hass.data[DOMAIN] = hass_data
         packet = {"decoded": {"portnum": "TRACEROUTE_APP", "traceroute": {}}, "fromId": "", "toId": ""}
-        _handle_traceroute(hass, store, packet)
+        _handle_traceroute(hass, "_legacy", store, packet)
         assert store.get_all_traceroutes() == {}
 
 
@@ -284,7 +284,7 @@ class TestHandleWaypoint:
             },
             "fromId": "!aabbccdd",
         }
-        _handle_waypoint(hass, store, packet)
+        _handle_waypoint(hass, "_legacy", store, packet)
         await hass.async_block_till_done()
 
         wps = store.get_waypoints()
@@ -314,7 +314,7 @@ class TestHandleWaypoint:
             },
             "fromId": "!aabbccdd",
         }
-        _handle_waypoint(hass, store, packet)
+        _handle_waypoint(hass, "_legacy", store, packet)
         await hass.async_block_till_done()
 
         assert 42 not in store.get_waypoints()
@@ -323,5 +323,5 @@ class TestHandleWaypoint:
     async def test_no_waypoint_data_ignored(self, hass: HomeAssistant, store: MeshtasticUiStore, hass_data: dict):
         hass.data[DOMAIN] = hass_data
         packet = {"decoded": {"portnum": "WAYPOINT_APP", "waypoint": {}}, "fromId": "!aa"}
-        _handle_waypoint(hass, store, packet)
+        _handle_waypoint(hass, "_legacy", store, packet)
         assert store.get_waypoints() == {}
