@@ -133,6 +133,48 @@ class HaBLEClient:
         )
         _LOGGER.info("HaBLEClient: connected to %s via HA Bluetooth", self._address)
 
+        # Trigger an OS-level BLE bond if the radio requires it. Many
+        # Meshtastic radios reject GATT writes from unbonded clients even
+        # when their pairing mode is "No PIN" (JustWorks just means
+        # auto-confirm — the bond still has to exist). Bleak's pair() is
+        # idempotent on already-bonded devices, so calling it every connect
+        # is safe.
+        #
+        # Caveats: ESPHome BLE proxies don't relay pairing — pair() will
+        # fail with an "operation not supported" / "unsupported transport"
+        # error if the link goes through a proxy. CoreBluetooth (macOS)
+        # auto-pairs and may not implement pair() at all. We catch and
+        # log; the connection itself stays up either way.
+        try:
+            paired = await self._client.pair()
+            if paired:
+                _LOGGER.debug(
+                    "HaBLEClient: bonded with %s at OS level", self._address
+                )
+            else:
+                _LOGGER.debug(
+                    "HaBLEClient: pair() returned False for %s — radio may "
+                    "not require bonding", self._address,
+                )
+        except NotImplementedError:
+            # Some bleak backends (CoreBluetooth) don't implement pair().
+            _LOGGER.debug(
+                "HaBLEClient: backend doesn't support pair() for %s",
+                self._address,
+            )
+        except Exception as err:  # noqa: BLE001
+            # Most common cause: ESPHome BT proxy in path. Falls back to
+            # whatever bond state already exists. If the radio requires
+            # bonding and there isn't one, GATT writes will fail later and
+            # the user will see the standard reconnect-spam pattern; the
+            # workaround is the bluetoothctl-on-HAOS path documented in #33.
+            _LOGGER.debug(
+                "HaBLEClient: pair() failed for %s (%s) — continuing with "
+                "current bond state. If writes fail, you may need to pair "
+                "manually via bluetoothctl on the HAOS host.",
+                self._address, err,
+            )
+
     def disconnect(self) -> None:
         """Disconnect from the BLE device."""
         if self._client and self._client.is_connected:
