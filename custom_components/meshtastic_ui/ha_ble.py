@@ -35,6 +35,11 @@ class HaBLEClient:
     ``asyncio.run_coroutine_threadsafe``.
     """
 
+    # address -> "ok" | "skip" | "proxy" | "auth_failed" | "unsupported"
+    # so we don't retry pair() on every reconnect (a failed
+    # AuthenticationFailed leaves BlueZ in a bad state).
+    _pair_cache: dict[str, str] = {}
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -139,43 +144,68 @@ class HaBLEClient:
         # the bond itself still has to exist. bleak's pair() is idempotent
         # on already-bonded devices.
         #
-        # Wrapped in a short timeout because pair() hangs forever when an
-        # ESPHome BT proxy is in the path (proxies don't relay bonding).
-        # We don't want a stuck pair to abort the whole connection — fall
-        # through and let the link try, then surface a clear log if writes
-        # later fail.
-        try:
-            paired = await asyncio.wait_for(self._client.pair(), timeout=5.0)
-            if paired:
-                _LOGGER.debug(
-                    "HaBLEClient: bonded with %s at OS level", self._address
+        # We cache the per-address result on the class to avoid retrying a
+        # broken pairing on every reconnect — a failed AuthenticationFailed
+        # leaves BlueZ in a state where every subsequent op returns
+        # ATT 0x0e (Unlikely Error), so we'd just spin forever.
+        if self._address not in HaBLEClient._pair_cache:
+            try:
+                paired = await asyncio.wait_for(
+                    self._client.pair(), timeout=5.0
                 )
-            else:
-                _LOGGER.debug(
-                    "HaBLEClient: pair() returned False for %s — radio may "
-                    "not require bonding", self._address,
+                HaBLEClient._pair_cache[self._address] = "ok" if paired else "skip"
+                if paired:
+                    _LOGGER.debug(
+                        "HaBLEClient: bonded with %s at OS level", self._address
+                    )
+                else:
+                    _LOGGER.debug(
+                        "HaBLEClient: pair() returned False for %s — radio may "
+                        "not require bonding", self._address,
+                    )
+            except asyncio.TimeoutError:
+                # ESPHome BT proxy: it can't relay bonding. Cache so we don't
+                # retry every reconnect.
+                HaBLEClient._pair_cache[self._address] = "proxy"
+                _LOGGER.warning(
+                    "HaBLEClient: pair() timed out for %s after 5s — likely an "
+                    "ESPHome BT proxy in path (proxies don't relay bonding). "
+                    "If GATT writes fail later, pair manually via bluetoothctl "
+                    "on the HAOS host (see issue #33).",
+                    self._address,
                 )
-        except asyncio.TimeoutError:
-            # Almost always an ESPHome BT proxy in the path. Log loudly so
-            # the user knows where to look — leave the connection up, the
-            # radio may not require a bond.
-            _LOGGER.warning(
-                "HaBLEClient: pair() timed out for %s after 5s — likely an "
-                "ESPHome BT proxy in path (proxies don't relay bonding). "
-                "If GATT writes fail later, pair manually via bluetoothctl "
-                "on the HAOS host (see issue #33).",
-                self._address,
-            )
-        except NotImplementedError:
+            except NotImplementedError:
+                HaBLEClient._pair_cache[self._address] = "unsupported"
+                _LOGGER.debug(
+                    "HaBLEClient: backend doesn't support pair() for %s",
+                    self._address,
+                )
+            except Exception as err:  # noqa: BLE001
+                err_text = str(err)
+                HaBLEClient._pair_cache[self._address] = "auth_failed"
+                if "AuthenticationFailed" in err_text or "Authentication Failed" in err_text:
+                    _LOGGER.warning(
+                        "HaBLEClient: bonding %s rejected by radio "
+                        "(AuthenticationFailed). The radio likely already has "
+                        "a bond with another device (commonly your phone). "
+                        "To fix: SSH into HAOS, run "
+                        "`bluetoothctl remove %s`, then unpair the radio in "
+                        "the Meshtastic phone app, power-cycle the radio, "
+                        "and restart this integration. Continuing without a "
+                        "fresh bond — GATT writes may still fail until the "
+                        "bond is reset.",
+                        self._address, self._address,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "HaBLEClient: pair() failed for %s (%s) — continuing "
+                        "with current bond state.",
+                        self._address, err_text,
+                    )
+        else:
             _LOGGER.debug(
-                "HaBLEClient: backend doesn't support pair() for %s",
-                self._address,
-            )
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug(
-                "HaBLEClient: pair() failed for %s (%s) — continuing with "
-                "current bond state.",
-                self._address, err,
+                "HaBLEClient: skipping pair() for %s (cached result: %s)",
+                self._address, HaBLEClient._pair_cache[self._address],
             )
 
     def disconnect(self) -> None:
