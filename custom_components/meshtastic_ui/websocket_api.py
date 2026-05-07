@@ -611,27 +611,43 @@ async def ws_send_message(
             msg["id"], {"success": True, "packet_id": packet_id}
         )
     except Exception as err:  # noqa: BLE001
-        # If the underlying transport reports it's not connected (common for
-        # BLE radios that drop silently), kick the reconnect loop so the UI
-        # banner / state reflects reality and a retry has a path forward.
-        err_text = str(err)
-        if "Not connected" in err_text or "BLEError" in type(err).__name__:
+        # Any send failure on a radio means the link is unreliable right now —
+        # kick a forced reconnect so the next attempt has a fresh interface,
+        # and surface a clean message to the UI rather than the meshtastic
+        # library's misleading "did you enter the pairing PIN" boilerplate
+        # (which gets raised on _every_ BLE write failure regardless of cause).
+        err_text = str(err) or err.__class__.__name__
+        link_down_signals = (
+            "Not connected",
+            "BLEError",
+            "PIN",
+            "ConnectionError",
+            "TimeoutError",
+            "No connection",
+            "is_connected",
+        )
+        looks_like_link_down = (
+            any(s in err_text for s in link_down_signals)
+            or "BLE" in type(err).__name__
+            or "Connection" in type(err).__name__
+        )
+        if looks_like_link_down:
             _LOGGER.warning(
-                "Send failed because the radio link is down (%s); triggering reconnect",
-                err_text,
+                "Send failed for radio %s (link likely down: %s) — forcing reconnect",
+                entry_id_for_dispatch, err_text,
             )
             try:
                 hass.async_create_task(conn.async_force_reconnect())
             except Exception:  # noqa: BLE001
-                pass
+                _LOGGER.exception("Force reconnect failed for %s", entry_id_for_dispatch)
             connection.send_error(
                 msg["id"],
                 "radio_disconnected",
-                "Radio disconnected — reconnecting. Try again in a few seconds.",
+                "Radio link dropped — reconnecting. Try again in a few seconds.",
             )
             return
-        _LOGGER.exception("Send message failed")
-        connection.send_error(msg["id"], "send_failed", err_text or "Operation failed")
+        _LOGGER.exception("Send message failed for radio %s", entry_id_for_dispatch)
+        connection.send_error(msg["id"], "send_failed", err_text)
 
 
 @websocket_command(

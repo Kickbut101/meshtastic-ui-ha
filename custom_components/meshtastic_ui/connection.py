@@ -933,6 +933,21 @@ class MeshtasticConnection:
                 return False
             if hasattr(iface, "_isConnected") and not iface._isConnected:
                 return False
+            # BLE-specific: meshtastic's BLEInterface holds a `client` attribute
+            # which wraps our HaBLEClient. When the BLE link drops silently
+            # (phone re-pairs, out of range, etc.), HaBLEClient resets its
+            # underlying _client to None — but the meshtastic library's
+            # `_isConnected` flag often stays True, so we'd never trigger
+            # reconnect and every send would fail with "Not connected".
+            ble_client = getattr(iface, "client", None)
+            if ble_client is not None:
+                inner = getattr(ble_client, "_client", "missing")
+                if inner is None:
+                    return False
+                # BleakClient.is_connected is the canonical answer when present.
+                is_connected = getattr(inner, "is_connected", None)
+                if is_connected is False:
+                    return False
             return True
         except Exception:  # noqa: BLE001
             return False
