@@ -133,20 +133,19 @@ class HaBLEClient:
         )
         _LOGGER.info("HaBLEClient: connected to %s via HA Bluetooth", self._address)
 
-        # Trigger an OS-level BLE bond if the radio requires it. Many
-        # Meshtastic radios reject GATT writes from unbonded clients even
-        # when their pairing mode is "No PIN" (JustWorks just means
-        # auto-confirm — the bond still has to exist). Bleak's pair() is
-        # idempotent on already-bonded devices, so calling it every connect
-        # is safe.
+        # Best-effort OS-level BLE bond. Many Meshtastic radios reject GATT
+        # writes from unbonded clients even when their pairing mode is
+        # "No PIN" — the radio's setting only means JustWorks (auto-confirm);
+        # the bond itself still has to exist. bleak's pair() is idempotent
+        # on already-bonded devices.
         #
-        # Caveats: ESPHome BLE proxies don't relay pairing — pair() will
-        # fail with an "operation not supported" / "unsupported transport"
-        # error if the link goes through a proxy. CoreBluetooth (macOS)
-        # auto-pairs and may not implement pair() at all. We catch and
-        # log; the connection itself stays up either way.
+        # Wrapped in a short timeout because pair() hangs forever when an
+        # ESPHome BT proxy is in the path (proxies don't relay bonding).
+        # We don't want a stuck pair to abort the whole connection — fall
+        # through and let the link try, then surface a clear log if writes
+        # later fail.
         try:
-            paired = await self._client.pair()
+            paired = await asyncio.wait_for(self._client.pair(), timeout=5.0)
             if paired:
                 _LOGGER.debug(
                     "HaBLEClient: bonded with %s at OS level", self._address
@@ -156,22 +155,26 @@ class HaBLEClient:
                     "HaBLEClient: pair() returned False for %s — radio may "
                     "not require bonding", self._address,
                 )
+        except asyncio.TimeoutError:
+            # Almost always an ESPHome BT proxy in the path. Log loudly so
+            # the user knows where to look — leave the connection up, the
+            # radio may not require a bond.
+            _LOGGER.warning(
+                "HaBLEClient: pair() timed out for %s after 5s — likely an "
+                "ESPHome BT proxy in path (proxies don't relay bonding). "
+                "If GATT writes fail later, pair manually via bluetoothctl "
+                "on the HAOS host (see issue #33).",
+                self._address,
+            )
         except NotImplementedError:
-            # Some bleak backends (CoreBluetooth) don't implement pair().
             _LOGGER.debug(
                 "HaBLEClient: backend doesn't support pair() for %s",
                 self._address,
             )
         except Exception as err:  # noqa: BLE001
-            # Most common cause: ESPHome BT proxy in path. Falls back to
-            # whatever bond state already exists. If the radio requires
-            # bonding and there isn't one, GATT writes will fail later and
-            # the user will see the standard reconnect-spam pattern; the
-            # workaround is the bluetoothctl-on-HAOS path documented in #33.
             _LOGGER.debug(
                 "HaBLEClient: pair() failed for %s (%s) — continuing with "
-                "current bond state. If writes fail, you may need to pair "
-                "manually via bluetoothctl on the HAOS host.",
+                "current bond state.",
                 self._address, err,
             )
 
