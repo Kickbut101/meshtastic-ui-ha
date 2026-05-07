@@ -187,6 +187,15 @@ class HaBLEClient:
                 pass
         self._client = None
 
+    def close(self) -> None:
+        """Alias for disconnect — meshtastic's BLEInterface calls client.close()
+        during cleanup. Without this method an AttributeError fired from inside
+        bleak_esphome's disconnected-callback path crashes the asyncio protocol
+        ('Fatal error: protocol.data_received() call failed') and takes down
+        the integration's BLE handling.
+        """
+        self.disconnect()
+
     def discover(
         self,
         timeout: float = 10,
