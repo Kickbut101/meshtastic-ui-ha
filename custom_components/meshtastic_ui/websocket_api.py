@@ -138,20 +138,30 @@ async def ws_radios(
     title or "Meshtastic Radio". Includes the last 4 hex chars of the
     address as a disambiguator when there are multiple radios.
     """
-    entries = _get_entries(hass)
+    entries_data = _get_entries(hass)
     radios: list[dict[str, Any]] = []
-    for entry_id, data in entries.items():
-        if entry_id == "_legacy":
-            radios.append({
-                "radio_id": "_legacy",
-                "title": "Meshtastic Radio",
-                "name": "Meshtastic Radio",
-                "short_name": None,
-                "last4": None,
-                "connection_type": None,
-                "address": None,
-                "state": None,
-            })
+
+    # Legacy test-fixture shape — surface as a single radio.
+    if "_legacy" in entries_data:
+        radios.append({
+            "radio_id": "_legacy",
+            "title": "Meshtastic Radio",
+            "name": "Meshtastic Radio",
+            "short_name": None,
+            "last4": None,
+            "connection_type": None,
+            "address": None,
+            "state": None,
+        })
+        connection.send_result(msg["id"], {"radios": radios})
+        return
+
+    # Iterate HA's canonical config-entries list rather than our internal
+    # dict, so failed/cancelled setups that left orphans behind don't
+    # appear in the picker. Skip entries that haven't finished loading.
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        data = entries_data.get(entry.entry_id)
+        if data is None:
             continue
         conn = data.get("connection")
         config = data.get("config", {})
@@ -177,10 +187,10 @@ async def ws_radios(
         last4 = _format_address_last4(address)
 
         # Best-effort label: longName > config entry title > generic.
-        label = long_name or data.get("title") or "Meshtastic Radio"
+        label = long_name or entry.title or data.get("title") or "Meshtastic Radio"
 
         radios.append({
-            "radio_id": entry_id,
+            "radio_id": entry.entry_id,
             "title": label,
             "name": long_name,
             "short_name": short_name,

@@ -268,23 +268,33 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
-    if unload_ok:
-        domain_data = hass.data.get(DOMAIN, {})
-        entries = domain_data.get("entries", {})
-        data = entries.pop(entry.entry_id, {})
-        for unsub in data.get("unsub_callbacks", []):
+    # Always clean up entry-scoped data, even if platform unload failed —
+    # leaving orphans here causes stale rows in the radio picker dropdown
+    # after failed/cancelled setups.
+    domain_data = hass.data.get(DOMAIN, {})
+    entries = domain_data.get("entries", {})
+    data = entries.pop(entry.entry_id, {})
+    for unsub in data.get("unsub_callbacks", []):
+        try:
             unsub()
-        # Persist time-series before shutdown.
-        ts_s: TimeSeriesStore | None = data.get("ts_store")
-        ts = data.get("ts")
-        if ts_s and ts:
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("unsub_callback raised during unload", exc_info=True)
+    ts_s: TimeSeriesStore | None = data.get("ts_store")
+    ts = data.get("ts")
+    if ts_s and ts:
+        try:
             await ts_s.async_save(ts)
-        connection: MeshtasticConnection | None = data.get("connection")
-        if connection is not None:
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("ts_store save failed during unload", exc_info=True)
+    connection: MeshtasticConnection | None = data.get("connection")
+    if connection is not None:
+        try:
             await connection.async_disconnect()
-        # Only unregister the panel when the last entry is gone.
-        if not entries:
-            async_unregister_panel(hass)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("connection disconnect failed during unload", exc_info=True)
+    # Only unregister the panel when the last entry is gone.
+    if not entries:
+        async_unregister_panel(hass)
 
     return unload_ok
 
