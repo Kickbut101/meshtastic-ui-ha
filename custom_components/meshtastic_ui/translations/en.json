@@ -3,7 +3,7 @@
     "flow_title": "{name} — {address}",
     "step": {
       "user": {
-        "title": "Meshtastic UI",
+        "title": "Meshtastic UI-TEST",
         "description": "Connect directly to your Meshtastic radio. Choose a connection type.",
         "data": {
           "connection_type": "Connection type"
