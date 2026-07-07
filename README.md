@@ -1,5 +1,7 @@
 # Meshtastic UI for Home Assistant
 
+Small Change for purposes of forking
+
 > **Beta / Work in Progress** — This integration is under active development. Expect rough edges and breaking changes. If you run into issues, please [open an issue on GitHub](https://github.com/Daring-Designs/meshtastic-ui-ha/issues).
 
 A companion HACS integration that adds a full-featured dashboard for your [Meshtastic](https://meshtastic.org) mesh network in Home Assistant. Connects directly to your radio via TCP or Serial and provides messaging, node management, mapping, and complete radio configuration — all from the HA sidebar.
