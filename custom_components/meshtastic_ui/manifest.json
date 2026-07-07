@@ -1,15 +1,15 @@
 {
   "domain": "meshtastic_ui",
-  "name": "Meshtastic UI",
-  "codeowners": ["@Daring-Designs"],
+  "name": "Meshtastic UI-Test",
+  "codeowners": ["@Kickbut101"],
   "config_flow": true,
   "dependencies": ["websocket_api", "http", "frontend"],
-  "documentation": "https://github.com/Daring-Designs/meshtastic-ui-ha",
+  "documentation": "https://github.com/Kickbut101/meshtastic-ui-ha",
   "integration_type": "service",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/Daring-Designs/meshtastic-ui-ha/issues",
+  "issue_tracker": "https://github.com/Kickbut101/meshtastic-ui-ha/issues",
   "requirements": ["meshtastic>=2.5.0"],
-  "version": "1.0.12",
+  "version": "1.0.13",
   "zeroconf": [
     "_meshtastic._tcp.local.",
     { "type": "_http._tcp.local.", "name": "meshtastic*" }
